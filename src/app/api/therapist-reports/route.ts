@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { therapists, therapistMonthlyReports, patientVisits, attendance, therapistCommissions, branches } from "@/lib/db/schema";
-import { eq, and, gte, lte } from "drizzle-orm";
+import { eq, and, gte, lte, inArray } from "drizzle-orm";
 import { getSession, getActiveBranchFilter } from "@/lib/auth";
 
 export async function GET(request: Request) {
@@ -30,7 +30,7 @@ export async function GET(request: Request) {
       filterEndDate = `${year}-${m}-${lastDay}`;
     }
 
-    // Determine strict branch filter:
+    // Determine branch filter:
     // Non-super-admin users CANNOT access other branches under any circumstances.
     let branchFilter: string | null = null;
     if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR") {
@@ -47,24 +47,32 @@ export async function GET(request: Request) {
     const startIso = new Date(`${filterStartDate}T00:00:00+07:00`).toISOString();
     const endIso = new Date(`${filterEndDate}T23:59:59.999+07:00`).toISOString();
 
-    // 1. Fetch active therapists strictly isolated by branch to prevent cross-branch leakage
-    const therapistConditions = [eq(therapists.isActive, true)];
+    // 1. Fetch completed visits in this period (scoped to branch if filtered)
+    const visitConditions = [
+      gte(patientVisits.visitDate, startIso),
+      lte(patientVisits.visitDate, endIso),
+      eq(patientVisits.status, "completed"),
+    ];
     if (branchFilter) {
-      therapistConditions.push(eq(therapists.branchId, branchFilter));
+      visitConditions.push(eq(patientVisits.branchId, branchFilter));
     }
 
-    const activeTherapists = await db
-      .select()
-      .from(therapists)
-      .where(and(...therapistConditions));
+    const allMonthVisits = await db
+      .select({
+        id: patientVisits.id,
+        therapistId: patientVisits.therapistId,
+        branchId: patientVisits.branchId,
+      })
+      .from(patientVisits)
+      .where(and(...visitConditions));
 
-    // 2. Pre-fetch commissions & visits for the period, strictly scoped to branch if filtered
-    const visitConditions = [
+    // 2. Fetch commissions in this period
+    const commVisitConditions = [
       gte(patientVisits.visitDate, startIso),
       lte(patientVisits.visitDate, endIso),
     ];
     if (branchFilter) {
-      visitConditions.push(eq(patientVisits.branchId, branchFilter));
+      commVisitConditions.push(eq(patientVisits.branchId, branchFilter));
     }
 
     const allMonthCommissions = await db
@@ -75,22 +83,9 @@ export async function GET(request: Request) {
       })
       .from(therapistCommissions)
       .innerJoin(patientVisits, eq(therapistCommissions.visitId, patientVisits.id))
-      .where(and(...visitConditions));
+      .where(and(...commVisitConditions));
 
-    const allMonthVisits = await db
-      .select({
-        therapistId: patientVisits.therapistId,
-        branchId: patientVisits.branchId,
-      })
-      .from(patientVisits)
-      .where(
-        and(
-          eq(patientVisits.status, "completed"),
-          ...visitConditions
-        )
-      );
-
-    // 3. Pre-fetch saved reports for the period, strictly filtered by branch if active
+    // 3. Fetch saved reports in this period
     const reportConditions: any[] = [];
     if (month) {
       reportConditions.push(eq(therapistMonthlyReports.month, month));
@@ -111,40 +106,80 @@ export async function GET(request: Request) {
       .from(therapistMonthlyReports)
       .where(and(...reportConditions));
 
-    const savedReportsMap = new Map<string, typeof savedReports[0]>();
-    savedReports.forEach((r) => {
-      savedReportsMap.set(`${r.therapistId}_${r.branchId || "none"}`, r);
-      if (!savedReportsMap.has(r.therapistId)) {
-        savedReportsMap.set(r.therapistId, r);
-      }
-    });
-
     // 4. Pre-fetch branch names for clean display
     const allBranches = await db.select({ id: branches.id, name: branches.name }).from(branches);
     const branchNameMap = new Map(allBranches.map((b) => [b.id, b.name]));
 
-    // 5. Build report per therapist with branch isolation
+    // 5. Dynamic Branch Attribution:
+    // Therapists are attributed to the branch where they actually treated patients in this period
+    // because the salary/commission burden is borne by that branch!
+    const activePairsMap = new Map<string, { therapistId: string; branchId: string }>();
+
+    allMonthVisits.forEach((v) => {
+      const bId = v.branchId || branchFilter || "";
+      if (v.therapistId && bId) {
+        const key = `${v.therapistId}_${bId}`;
+        if (!activePairsMap.has(key)) {
+          activePairsMap.set(key, { therapistId: v.therapistId, branchId: bId });
+        }
+      }
+    });
+
+    // Also include saved reports that have activity
+    savedReports.forEach((r) => {
+      const bId = r.branchId || branchFilter || "";
+      if (r.therapistId && bId && r.totalTreatments > 0) {
+        const key = `${r.therapistId}_${bId}`;
+        if (!activePairsMap.has(key)) {
+          activePairsMap.set(key, { therapistId: r.therapistId, branchId: bId });
+        }
+      }
+    });
+
+    const activePairs = Array.from(activePairsMap.values());
+    if (activePairs.length === 0) {
+      return Response.json({ data: [] });
+    }
+
+    const therapistIds = Array.from(new Set(activePairs.map((p) => p.therapistId)));
+    const activeTherapists = await db
+      .select()
+      .from(therapists)
+      .where(inArray(therapists.id, therapistIds));
+
+    const therapistMap = new Map(activeTherapists.map((t) => [t.id, t]));
+
+    // 6. Build report per therapist for the branch where they handled patients
     const data = await Promise.all(
-      activeTherapists.map(async (t) => {
-        // Calculate commissions & treatments for this therapist, respecting their branch
+      activePairs.map(async (pair) => {
+        const t = therapistMap.get(pair.therapistId);
+        if (!t) return null;
+
+        // Treatments handled by this therapist AT THIS SPECIFIC BRANCH
+        const actualTreatments = allMonthVisits.filter(
+          (v) => v.therapistId === pair.therapistId && (v.branchId === pair.branchId || (!v.branchId && pair.branchId === branchFilter))
+        ).length;
+
+        // Strictly do NOT display therapists with 0 treatments
+        if (actualTreatments === 0) return null;
+
+        // Commissions earned by this therapist AT THIS SPECIFIC BRANCH
         const actualCommissions = allMonthCommissions
-          .filter((c) => c.therapistId === t.id && (!t.branchId || c.branchId === t.branchId))
+          .filter((c) => c.therapistId === pair.therapistId && (c.branchId === pair.branchId || (!c.branchId && pair.branchId === branchFilter)))
           .reduce((sum, c) => sum + c.amount, 0);
 
-        const actualTreatments = allMonthVisits
-          .filter((v) => v.therapistId === t.id && (!t.branchId || v.branchId === t.branchId))
-          .length;
-
-        const reportKey = `${t.id}_${t.branchId || "none"}`;
-        const saved = savedReportsMap.get(reportKey) || savedReportsMap.get(t.id);
+        // Find existing saved report for this therapist at this branch
+        const saved = savedReports.find(
+          (r) => r.therapistId === pair.therapistId && (r.branchId === pair.branchId || (!r.branchId && pair.branchId === branchFilter))
+        );
 
         if (saved) {
           const newTakeHomePay = saved.baseSalary + actualCommissions + saved.allowances + saved.bonuses - saved.deductions;
           return {
             ...saved,
             therapistName: t.name,
-            branchId: t.branchId || saved.branchId,
-            branchName: branchNameMap.get(t.branchId || saved.branchId || "") || "Tanpa Cabang",
+            branchId: pair.branchId,
+            branchName: branchNameMap.get(pair.branchId) || "Tanpa Cabang",
             commissions: actualCommissions,
             totalTreatments: actualTreatments,
             takeHomePay: newTakeHomePay,
@@ -152,38 +187,41 @@ export async function GET(request: Request) {
           };
         }
 
-        // Attendance strictly isolated by therapist and branch
-        const attendanceConditions = [
-          eq(attendance.therapistId, t.id),
-          gte(attendance.date, filterStartDate as string),
-          lte(attendance.date, filterEndDate as string),
-        ];
-        if (t.branchId) {
-          attendanceConditions.push(eq(attendance.branchId, t.branchId));
-        }
-
+        // Attendance for this therapist during the period
         const attendanceLogs = await db
-          .select({ status: attendance.status })
+          .select({ status: attendance.status, branchId: attendance.branchId })
           .from(attendance)
-          .where(and(...attendanceConditions));
+          .where(
+            and(
+              eq(attendance.therapistId, t.id),
+              gte(attendance.date, filterStartDate as string),
+              lte(attendance.date, filterEndDate as string)
+            )
+          );
+
+        // Filter attendance matching this branch (or global)
+        const relevantAttendance = attendanceLogs.filter(
+          (a) => !a.branchId || a.branchId === pair.branchId
+        );
 
         let present = 0;
         let late = 0;
         let absent = 0;
-        attendanceLogs.forEach((log) => {
+        relevantAttendance.forEach((log) => {
           if (log.status === "PRESENT") present++;
           else if (log.status === "LATE") late++;
           else if (log.status === "ABSENT") absent++;
         });
 
-        const takeHomePay = t.baseSalary + actualCommissions;
+        const baseSalary = t.baseSalary;
+        const takeHomePay = baseSalary + actualCommissions;
 
         return {
           id: null,
           therapistId: t.id,
           therapistName: t.name,
-          branchId: t.branchId,
-          branchName: branchNameMap.get(t.branchId || "") || "Tanpa Cabang",
+          branchId: pair.branchId,
+          branchName: branchNameMap.get(pair.branchId) || "Tanpa Cabang",
           month,
           startDate: filterStartDate,
           endDate: filterEndDate,
@@ -192,7 +230,7 @@ export async function GET(request: Request) {
           attendanceLate: late,
           attendanceAbsent: absent,
           attendancePermit: 0,
-          baseSalary: t.baseSalary,
+          baseSalary,
           commissions: actualCommissions,
           allowances: 0,
           bonuses: 0,
@@ -207,8 +245,7 @@ export async function GET(request: Request) {
       })
     );
 
-    // Filter terapis yang memiliki minimal 1 penanganan pasien pada periode ini (jangan tampilkan yang 0 pasien)
-    const filteredData = data.filter((item) => item.totalTreatments > 0);
+    const filteredData = data.filter((item): item is NonNullable<typeof item> => item !== null && item.totalTreatments > 0);
 
     return Response.json({ data: filteredData });
   } catch (error) {
