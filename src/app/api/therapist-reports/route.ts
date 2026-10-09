@@ -207,7 +207,10 @@ export async function GET(request: Request) {
       })
     );
 
-    return Response.json({ data });
+    // Filter terapis yang memiliki minimal 1 penanganan pasien pada periode ini (jangan tampilkan yang 0 pasien)
+    const filteredData = data.filter((item) => item.totalTreatments > 0);
+
+    return Response.json({ data: filteredData });
   } catch (error) {
     console.error("GET /api/therapist-reports error:", error);
     return Response.json({ error: "Gagal mengambil data laporan" }, { status: 500 });

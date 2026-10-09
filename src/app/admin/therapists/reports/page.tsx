@@ -221,7 +221,8 @@ export default function TherapistReportsPage() {
     }
   };
 
-  const filteredReports = reports;
+  // Hanya tampilkan terapis yang memiliki minimal 1 pasien pada periode ini
+  const filteredReports = reports.filter((r) => r.totalTreatments > 0);
 
   // Group reports by branch for display
   const branchGroups: BranchGroup[] = (() => {
