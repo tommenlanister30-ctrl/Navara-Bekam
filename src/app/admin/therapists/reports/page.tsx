@@ -21,6 +21,7 @@ import {
   FileText,
   Table,
   RefreshCw,
+  Building2,
 } from "lucide-react";
 import PageHeader from "@/components/layout/PageHeader";
 
@@ -29,6 +30,7 @@ type MonthlyReport = {
   therapistId: string;
   therapistName: string;
   branchId: string | null;
+  branchName: string;
   month: string | null;
   startDate?: string | null;
   endDate?: string | null;
@@ -50,6 +52,12 @@ type MonthlyReport = {
   isSaved: boolean;
 };
 
+type BranchGroup = {
+  branchId: string;
+  branchName: string;
+  reports: MonthlyReport[];
+};
+
 export default function TherapistReportsPage() {
   const router = useRouter();
   const [month, setMonth] = useState(() => {
@@ -66,6 +74,8 @@ export default function TherapistReportsPage() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
   });
 
+  const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string>("ALL");
   const [reports, setReports] = useState<MonthlyReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -81,17 +91,38 @@ export default function TherapistReportsPage() {
   const [activeReport, setActiveReport] = useState<MonthlyReport | null>(null);
 
   const [isMounted, setIsMounted] = useState(false);
-  useEffect(() => setIsMounted(true), []);
+  useEffect(() => {
+    setIsMounted(true);
+    // Fetch branches list
+    fetch("/api/branches")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.data) setBranches(d.data);
+      })
+      .catch(console.error);
+
+    // Initial sync with cookie if present
+    if (typeof document !== "undefined") {
+      const match = document.cookie.match(new RegExp("(^| )navara-selected-branch=([^;]+)"));
+      if (match && match[2]) {
+        setSelectedBranch(match[2]);
+      }
+    }
+  }, []);
 
   const fetchReports = useCallback(
-    async (targetMonth: string, start?: string, end?: string) => {
+    async (targetMonth: string, start?: string, end?: string, branch?: string) => {
       setLoading(true);
       setMessage(null);
       try {
-        const url =
+        let url =
           filterMode === "month"
             ? `/api/therapist-reports?month=${targetMonth}`
             : `/api/therapist-reports?startDate=${start}&endDate=${end}`;
+
+        if (branch && branch !== "ALL") {
+          url += `&branchId=${branch}`;
+        }
 
         const [res, sessionRes] = await Promise.all([
           fetch(url),
@@ -121,8 +152,8 @@ export default function TherapistReportsPage() {
   );
 
   useEffect(() => {
-    fetchReports(month, startDate, endDate);
-  }, [month, startDate, endDate, filterMode, fetchReports]);
+    fetchReports(month, startDate, endDate, selectedBranch);
+  }, [month, startDate, endDate, filterMode, selectedBranch, fetchReports]);
 
   const handleEditClick = (report: MonthlyReport) => {
     setActiveReport({ ...report });
@@ -192,10 +223,28 @@ export default function TherapistReportsPage() {
 
   const filteredReports = reports;
 
-  const handleBulkSave = async () => {
-    const unsaved = filteredReports.filter((r) => !r.isSaved);
+  // Group reports by branch for display
+  const branchGroups: BranchGroup[] = (() => {
+    const groupMap = new Map<string, BranchGroup>();
+    filteredReports.forEach((r) => {
+      const key = r.branchId || "no-branch";
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          branchId: key,
+          branchName: r.branchName || "Tanpa Cabang",
+          reports: [],
+        });
+      }
+      groupMap.get(key)!.reports.push(r);
+    });
+    return Array.from(groupMap.values());
+  })();
+
+  const handleBulkSave = async (specificReports?: MonthlyReport[]) => {
+    const targetList = specificReports || filteredReports;
+    const unsaved = targetList.filter((r) => !r.isSaved);
     if (unsaved.length === 0)
-      return alert("Semua laporan terapis untuk bulan ini sudah tersimpan.");
+      return alert("Semua laporan terapis untuk periode ini sudah tersimpan.");
     if (
       !confirm(
         `Simpan masal ${unsaved.length} draft laporan terapis sekaligus?`,
@@ -221,7 +270,7 @@ export default function TherapistReportsPage() {
         type: "success",
         text: `Berhasil memproses & menyimpan ${successCount} laporan terapis!`,
       });
-      fetchReports(month, startDate, endDate);
+      fetchReports(month, startDate, endDate, selectedBranch);
     } catch (err) {
       console.error(err);
       setMessage({
@@ -244,13 +293,14 @@ export default function TherapistReportsPage() {
     doc.text("Slip Gaji Terapis", 105, 20, { align: "center" });
 
     doc.setFontSize(12);
-    doc.text("Klinik Navara Reflexology", 105, 28, { align: "center" });
+    doc.text(`Klinik Navara Reflexology - Cabang ${report.branchName || "Pusat"}`, 105, 28, { align: "center" });
     
     doc.setFontSize(10);
-    doc.text(`Nama Terapis: ${report.therapistName}`, 14, 45);
-    doc.text(`Periode: ${readableMonth}`, 14, 52);
-    doc.text(`Total Penanganan: ${report.totalTreatments} Pasien`, 14, 59);
-    doc.text(`Kehadiran (Hadir/Telat/Absen): ${report.attendancePresent} / ${report.attendanceLate} / ${report.attendanceAbsent}`, 14, 66);
+    doc.text(`Nama Terapis: ${report.therapistName}`, 14, 43);
+    doc.text(`Cabang Penempatan: ${report.branchName || "Pusat"}`, 14, 49);
+    doc.text(`Periode: ${readableMonth}`, 14, 55);
+    doc.text(`Total Penanganan: ${report.totalTreatments} Pasien`, 14, 61);
+    doc.text(`Kehadiran (Hadir/Telat/Absen): ${report.attendancePresent} / ${report.attendanceLate} / ${report.attendanceAbsent}`, 14, 67);
 
     const tableData = [
       [{ content: "Keterangan", styles: { fontStyle: "bold", fillColor: [240, 240, 240] } }, { content: "Nominal", styles: { fontStyle: "bold", fillColor: [240, 240, 240], halign: "right" } }],
@@ -280,7 +330,8 @@ export default function TherapistReportsPage() {
     doc.text("(...........................)", 170, finalY + 55, { align: "center" });
 
     const fileNameMonth = month || "Periode";
-    doc.save(`Slip_Gaji_${report.therapistName.replace(/\s+/g, "_")}_${fileNameMonth}.pdf`);
+    const branchSafe = (report.branchName || "Cabang").replace(/\s+/g, "_");
+    doc.save(`Slip_Gaji_${branchSafe}_${report.therapistName.replace(/\s+/g, "_")}_${fileNameMonth}.pdf`);
   };
 
   const handleSendWA = (report: MonthlyReport) => {
@@ -289,10 +340,8 @@ export default function TherapistReportsPage() {
     // Format period to readable string
     const readableMonth = getPeriodLabel(report);
 
-    const messageText = `Halo ${report.therapistName}, berikut adalah informasi Slip Gaji Bulanan Anda untuk periode *${readableMonth}*.\n\nSilakan cek lampiran PDF yang kami kirimkan bersama pesan ini untuk melihat rincian Gaji Pokok, Komisi, Bonus, Potongan, dan Take Home Pay Anda. Terima kasih!`;
+    const messageText = `Halo ${report.therapistName}, berikut adalah informasi Slip Gaji Bulanan Anda (${report.branchName || "Cabang"}) untuk periode *${readableMonth}*.\n\nSilakan cek lampiran PDF yang kami kirimkan bersama pesan ini untuk melihat rincian Gaji Pokok, Komisi, Bonus, Potongan, dan Take Home Pay Anda. Terima kasih!`;
 
-    // Clean phone number (replace starting '0' with '62' if necessary)
-    // Here we can fetch the therapist's phone or assume they copy it. We direct to standard share.
     const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(messageText)}`;
     window.open(waUrl, "_blank");
   };
@@ -325,50 +374,71 @@ export default function TherapistReportsPage() {
     if (filteredReports.length === 0)
       return alert("Tidak ada data untuk diekspor");
 
-    const formattedData = filteredReports.map((r) => ({
-      "Nama Terapis": r.therapistName,
-      "Total Pasien": r.totalTreatments,
-      "Kehadiran (H/T/A)": `${r.attendancePresent}/${r.attendanceLate}/${r.attendanceAbsent}`,
-      "Gaji Pokok": r.baseSalary,
-      "Komisi Tindakan": r.commissions,
-      Tunjangan: r.allowances,
-      Bonus: r.bonuses,
-      Potongan: r.deductions,
-      "Take Home Pay": r.takeHomePay,
-      "Status Laporan": r.isSaved ? "Tersimpan" : "Draft",
-    }));
-
     const XLSX = await import("xlsx");
-    const worksheet = XLSX.utils.json_to_sheet(formattedData);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Gaji Terapis");
 
+    // Export per-branch: each branch gets its own separate worksheet
+    branchGroups.forEach((group) => {
+      const formattedData = group.reports.map((r) => ({
+        "Cabang": group.branchName,
+        "Nama Terapis": r.therapistName,
+        "Total Pasien": r.totalTreatments,
+        "Kehadiran (H/T/A)": `${r.attendancePresent}/${r.attendanceLate}/${r.attendanceAbsent}`,
+        "Gaji Pokok": r.baseSalary,
+        "Komisi Tindakan": r.commissions,
+        Tunjangan: r.allowances,
+        Bonus: r.bonuses,
+        Potongan: r.deductions,
+        "Take Home Pay": r.takeHomePay,
+        "Status Laporan": r.isSaved ? "Tersimpan" : "Draft",
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(formattedData);
+      // Sheet name max 31 chars in Excel
+      const sheetName = (group.branchName || "Tanpa Cabang").substring(0, 31).replace(/[\\/?*[\]]/g, "_");
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    });
+
+    // If more than 1 branch, also append a master summary sheet
+    if (branchGroups.length > 1) {
+      const allData = filteredReports.map((r) => ({
+        "Cabang": r.branchName || "Tanpa Cabang",
+        "Nama Terapis": r.therapistName,
+        "Total Pasien": r.totalTreatments,
+        "Kehadiran (H/T/A)": `${r.attendancePresent}/${r.attendanceLate}/${r.attendanceAbsent}`,
+        "Gaji Pokok": r.baseSalary,
+        "Komisi Tindakan": r.commissions,
+        Tunjangan: r.allowances,
+        Bonus: r.bonuses,
+        Potongan: r.deductions,
+        "Take Home Pay": r.takeHomePay,
+        "Status Laporan": r.isSaved ? "Tersimpan" : "Draft",
+      }));
+      const allSheet = XLSX.utils.json_to_sheet(allData);
+      XLSX.utils.book_append_sheet(workbook, allSheet, "Semua Cabang (Rekap)");
+    }
+
+    const branchLabel = selectedBranch !== "ALL" ? `_${selectedBranch}` : "";
     const fileName =
       filterMode === "month"
-        ? `Rekap_Gaji_Terapis_${month}.xlsx`
-        : `Rekap_Gaji_Terapis_${startDate}_sd_${endDate}.xlsx`;
+        ? `Rekap_Gaji_Terapis${branchLabel}_${month}.xlsx`
+        : `Rekap_Gaji_Terapis${branchLabel}_${startDate}_sd_${endDate}.xlsx`;
 
     XLSX.writeFile(workbook, fileName);
   };
 
   const handleExportPDF = async () => {
-    if (reports.length === 0) return alert("Tidak ada data untuk diekspor");
+    if (filteredReports.length === 0) return alert("Tidak ada data untuk diekspor");
 
     const { jsPDF } = await import("jspdf");
     const { default: autoTable } = await import("jspdf-autotable");
 
     const doc = new jsPDF("landscape");
 
-    // Title
-    doc.setFontSize(16);
-    doc.text("Rekap Gaji Terapis Radja Bekam", 14, 20);
-
-    doc.setFontSize(11);
     const periodText =
       filterMode === "month"
         ? `Periode: ${getMonthReadable(month)}`
         : `Periode: ${startDate} s/d ${endDate}`;
-    doc.text(periodText, 14, 28);
 
     const tableColumn = [
       "Nama Terapis",
@@ -380,11 +450,43 @@ export default function TherapistReportsPage() {
       "Bonus",
       "Potongan",
       "Take Home Pay",
+      "Status",
     ];
-    const tableRows: string[][] = [];
 
-    reports.forEach((r) => {
-      const reportData = [
+    let currentY = 20;
+
+    // Title
+    doc.setFontSize(16);
+    doc.text("Rekap Gaji Terapis - Klinik Navara Reflexology", 14, currentY);
+    currentY += 8;
+
+    doc.setFontSize(11);
+    doc.text(periodText, 14, currentY);
+    currentY += 10;
+
+    // Render branch by branch to guarantee zero cross-branch confusion
+    branchGroups.forEach((group, index) => {
+      if (index > 0) {
+        currentY = (doc as any).lastAutoTable?.finalY ? (doc as any).lastAutoTable.finalY + 14 : currentY + 14;
+        if (currentY > 165) {
+          doc.addPage();
+          currentY = 20;
+        }
+      }
+
+      const branchPayroll = group.reports.reduce((sum, r) => sum + r.takeHomePay, 0);
+
+      doc.setFontSize(13);
+      doc.setFont("helvetica", "bold");
+      doc.text(
+        `Cabang: ${group.branchName} (${group.reports.length} Terapis - Subtotal: ${formatRupiah(branchPayroll)})`,
+        14,
+        currentY
+      );
+      doc.setFont("helvetica", "normal");
+      currentY += 5;
+
+      const tableRows = group.reports.map((r) => [
         r.therapistName,
         r.totalTreatments.toString(),
         `${r.attendancePresent}/${r.attendanceLate}/${r.attendanceAbsent}`,
@@ -394,22 +496,23 @@ export default function TherapistReportsPage() {
         formatRupiah(r.bonuses),
         formatRupiah(r.deductions),
         formatRupiah(r.takeHomePay),
-      ];
-      tableRows.push(reportData);
+        r.isSaved ? "Terbit" : "Draft",
+      ]);
+
+      autoTable(doc, {
+        head: [tableColumn],
+        body: tableRows,
+        startY: currentY,
+        styles: { fontSize: 8.5 },
+        headStyles: { fillColor: [13, 148, 136] }, // emerald / teal
+      });
     });
 
-    autoTable(doc, {
-      head: [tableColumn],
-      body: tableRows,
-      startY: 35,
-      styles: { fontSize: 9 },
-      headStyles: { fillColor: [13, 148, 136] }, // blue-600
-    });
-
+    const branchLabel = selectedBranch !== "ALL" ? `_${selectedBranch}` : "";
     const fileName =
       filterMode === "month"
-        ? `Rekap_Gaji_Terapis_${month}.pdf`
-        : `Rekap_Gaji_Terapis_${startDate}_sd_${endDate}.pdf`;
+        ? `Rekap_Gaji_Terapis${branchLabel}_${month}.pdf`
+        : `Rekap_Gaji_Terapis${branchLabel}_${startDate}_sd_${endDate}.pdf`;
 
     doc.save(fileName);
   };
@@ -426,6 +529,30 @@ export default function TherapistReportsPage() {
           icon={Award}
           rightContent={
             <div className="flex flex-col md:flex-row items-center gap-3 mt-4 md:mt-0 w-full md:w-auto">
+
+              {/* Branch Selector (for SUPER_ADMIN / INVESTOR) */}
+              {session?.role === "SUPER_ADMIN" && (
+                <div className="relative">
+                  <Building2 className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-emerald-600 pointer-events-none" />
+                  <select
+                    id="branch-filter-select"
+                    value={selectedBranch}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSelectedBranch(val);
+                      document.cookie = `navara-selected-branch=${val}; path=/; max-age=${60 * 60 * 24 * 30}`;
+                    }}
+                    className="pl-9 pr-8 py-2.5 bg-white border border-gray-200 text-gray-900 rounded-xl focus:ring-2 focus:ring-emerald-500/20 text-sm outline-none cursor-pointer appearance-none transition-all font-semibold shadow-sm"
+                  >
+                    <option value="ALL">🏢 Semua Cabang</option>
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        📍 {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Mode Filter Selector */}
               <div className="flex items-center gap-2 bg-white rounded-xl border border-gray-200 p-1">
@@ -615,139 +742,171 @@ export default function TherapistReportsPage() {
           </div>
         </div>
 
-        {/* Main Grid List */}
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden relative">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse whitespace-nowrap">
-              <thead>
-                <tr className="bg-gray-50/50 text-xs uppercase tracking-wider text-gray-500 border-b border-gray-100">
-                  <th className="px-6 py-4 font-bold">Terapis</th>
-                  <th className="px-6 py-4 font-bold text-center">
-                    Status Rapor
-                  </th>
-                  <th className="px-6 py-4 font-bold text-center">Treatment</th>
-                  <th className="px-6 py-4 font-bold text-center">
-                    Kehadiran (H / T / A)
-                  </th>
-                  <th className="px-6 py-4 font-bold text-right">Gaji Pokok</th>
-                  <th className="px-6 py-4 font-bold text-right">
-                    Komisi Tindakan
-                  </th>
-                  <th className="px-6 py-4 font-bold text-right">
-                    Take-Home Pay (THP)
-                  </th>
-                  <th className="px-6 py-4 font-bold text-center">
-                    Aksi Distribusi & Rapor
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-6 py-16 text-center text-gray-400"
-                    >
-                      <div className="flex flex-col items-center">
-                        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-                        Mempersiapkan data rapor bulanan...
-                      </div>
-                    </td>
-                  </tr>
-                ) : filteredReports.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-6 py-16 text-center text-gray-500"
-                    >
-                      Tidak ada terapis aktif untuk periode ini.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredReports.map((r) => (
-                    <tr
-                      key={r.therapistId}
-                      className="hover:bg-blue-50/10 transition-colors"
-                    >
-                      <td className="px-6 py-4 font-bold text-gray-900">
-                        <div>{r.therapistName}</div>
-                        <div className="text-[10px] text-gray-400 mt-0.5 uppercase tracking-wide">
-                          ID: {r.therapistId?.substring(0, 8) || "N/A"}...
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        {r.isSaved ? (
-                          <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200">
-                            Telah Terbit
-                          </span>
-                        ) : (
-                          <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold tracking-wide uppercase bg-yellow-50 text-yellow-700 border border-yellow-200 animate-pulse">
-                            Draft (Belum Simpan)
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-center font-bold text-gray-800">
-                        {r.totalTreatments} Pasien
-                      </td>
-                      <td className="px-6 py-4 text-center font-semibold text-sm text-gray-600">
-                        <span className="text-blue-600 font-bold">
-                          {r.attendancePresent}
-                        </span>
-                        {" / "}
-                        <span className="text-amber-500 font-bold">
-                          {r.attendanceLate}
-                        </span>
-                        {" / "}
-                        <span className="text-red-500 font-bold">
-                          {r.attendanceAbsent}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right text-gray-600 font-medium">
-                        {formatRupiah(r.baseSalary)}
-                      </td>
-                      <td className="px-6 py-4 text-right text-blue-600 font-semibold">
-                        +{formatRupiah(r.commissions)}
-                      </td>
-                      <td className="px-6 py-4 text-right font-black text-gray-900">
-                        {formatRupiah(r.takeHomePay)}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className="inline-flex items-center gap-2">
-                          <button
-                            onClick={() => handleEditClick(r)}
-                            className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-blue-100"
-                          >
-                            <Edit className="w-3.5 h-3.5" />
-                            Kelola Rapor
-                          </button>
-
-                          <button
-                            disabled={!r.isSaved}
-                            onClick={() => handleDownloadSlipPDF(r)}
-                            className="bg-gray-50 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed text-gray-700 px-2 py-1.5 rounded-lg border border-gray-200 transition-colors"
-                            title="Download Slip Gaji (PDF)"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                          </button>
-
-                          <button
-                            disabled={!r.isSaved}
-                            onClick={() => handleSendWA(r)}
-                            className="bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 border border-blue-100 cursor-pointer"
-                            title="Kirim slip gaji privat ke WhatsApp Terapis"
-                          >
-                            <Send className="w-3.5 h-3.5" />
-                            Kirim WA
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+        {/* Main Grid List — Grouped by Branch */}
+        {loading ? (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden relative">
+            <div className="px-6 py-16 text-center text-gray-400">
+              <div className="flex flex-col items-center">
+                <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                Mempersiapkan data rapor bulanan...
+              </div>
+            </div>
           </div>
-        </div>
+        ) : branchGroups.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden relative">
+            <div className="px-6 py-16 text-center text-gray-500">
+              Tidak ada terapis aktif untuk periode ini.
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {branchGroups.map((group) => {
+              const branchSaved = group.reports.filter((r) => r.isSaved).length;
+              const branchDraft = group.reports.filter((r) => !r.isSaved).length;
+              const branchPayroll = group.reports.reduce((sum, r) => sum + r.takeHomePay, 0);
+
+              return (
+                <div key={group.branchId} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden relative">
+                  {/* Branch Section Header */}
+                  <div className="bg-gradient-to-r from-emerald-600 to-teal-600 px-6 py-3.5 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center shadow-inner">
+                        <Building2 className="w-5 h-5 text-white" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-white font-black text-base">{group.branchName}</h3>
+                          <span className="bg-white/20 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                            Cabang Terisolasi
+                          </span>
+                        </div>
+                        <p className="text-emerald-100 text-xs font-medium">
+                          {group.reports.length} Terapis • {branchSaved} Rapor Terbit • {branchDraft} Draft Belum Simpan
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      {branchDraft > 0 && (
+                        <button
+                          onClick={() => handleBulkSave(group.reports)}
+                          disabled={bulking}
+                          className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-white/30 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+                          title={`Simpan ${branchDraft} draft laporan di cabang ${group.branchName}`}
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Simpan {branchDraft} Draft Cabang Ini
+                        </button>
+                      )}
+                      <div className="text-right">
+                        <p className="text-emerald-100 text-[10px] font-bold uppercase tracking-wider">Subtotal Payroll</p>
+                        <p className="text-white font-black text-base">{formatRupiah(branchPayroll)}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Branch Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse whitespace-nowrap">
+                      <thead>
+                        <tr className="bg-gray-50/50 text-xs uppercase tracking-wider text-gray-500 border-b border-gray-100">
+                          <th className="px-6 py-3 font-bold">Terapis</th>
+                          <th className="px-6 py-3 font-bold text-center">Status Rapor</th>
+                          <th className="px-6 py-3 font-bold text-center">Treatment</th>
+                          <th className="px-6 py-3 font-bold text-center">Kehadiran (H / T / A)</th>
+                          <th className="px-6 py-3 font-bold text-right">Gaji Pokok</th>
+                          <th className="px-6 py-3 font-bold text-right">Komisi Tindakan</th>
+                          <th className="px-6 py-3 font-bold text-right">Take-Home Pay (THP)</th>
+                          <th className="px-6 py-3 font-bold text-center">Aksi Distribusi & Rapor</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {group.reports.map((r) => (
+                          <tr
+                            key={r.therapistId}
+                            className="hover:bg-blue-50/10 transition-colors"
+                          >
+                            <td className="px-6 py-4 font-bold text-gray-900">
+                              <div>{r.therapistName}</div>
+                              <div className="text-[10px] text-gray-400 mt-0.5 uppercase tracking-wide">
+                                ID: {r.therapistId?.substring(0, 8) || "N/A"}...
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 text-center">
+                              {r.isSaved ? (
+                                <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200">
+                                  Telah Terbit
+                                </span>
+                              ) : (
+                                <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold tracking-wide uppercase bg-yellow-50 text-yellow-700 border border-yellow-200 animate-pulse">
+                                  Draft (Belum Simpan)
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-center font-bold text-gray-800">
+                              {r.totalTreatments} Pasien
+                            </td>
+                            <td className="px-6 py-4 text-center font-semibold text-sm text-gray-600">
+                              <span className="text-blue-600 font-bold">
+                                {r.attendancePresent}
+                              </span>
+                              {" / "}
+                              <span className="text-amber-500 font-bold">
+                                {r.attendanceLate}
+                              </span>
+                              {" / "}
+                              <span className="text-red-500 font-bold">
+                                {r.attendanceAbsent}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-right text-gray-600 font-medium">
+                              {formatRupiah(r.baseSalary)}
+                            </td>
+                            <td className="px-6 py-4 text-right text-blue-600 font-semibold">
+                              +{formatRupiah(r.commissions)}
+                            </td>
+                            <td className="px-6 py-4 text-right font-black text-gray-900">
+                              {formatRupiah(r.takeHomePay)}
+                            </td>
+                            <td className="px-6 py-4 text-center">
+                              <div className="inline-flex items-center gap-2">
+                                <button
+                                  onClick={() => handleEditClick(r)}
+                                  className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-blue-100"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                  Kelola Rapor
+                                </button>
+
+                                <button
+                                  disabled={!r.isSaved}
+                                  onClick={() => handleDownloadSlipPDF(r)}
+                                  className="bg-gray-50 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed text-gray-700 px-2 py-1.5 rounded-lg border border-gray-200 transition-colors"
+                                  title="Download Slip Gaji (PDF)"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                </button>
+
+                                <button
+                                  disabled={!r.isSaved}
+                                  onClick={() => handleSendWA(r)}
+                                  className="bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 border border-blue-100 cursor-pointer"
+                                  title="Kirim slip gaji privat ke WhatsApp Terapis"
+                                >
+                                  <Send className="w-3.5 h-3.5" />
+                                  Kirim WA
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Modal Kelola Rapor */}
         {isModalOpen && activeReport && (
@@ -763,6 +922,10 @@ export default function TherapistReportsPage() {
                     Terapis:{" "}
                     <span className="font-bold text-gray-700">
                       {activeReport.therapistName}
+                    </span>{" "}
+                    | Cabang:{" "}
+                    <span className="font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">
+                      {activeReport.branchName || "Tanpa Cabang"}
                     </span>{" "}
                     | Periode:{" "}
                     <span className="font-bold text-gray-700">

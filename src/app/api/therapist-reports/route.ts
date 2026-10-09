@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
-import { therapists, therapistMonthlyReports, patientVisits, attendance, therapistCommissions } from "@/lib/db/schema";
-import { eq, and, like, gte, lte } from "drizzle-orm";
+import { therapists, therapistMonthlyReports, patientVisits, attendance, therapistCommissions, branches } from "@/lib/db/schema";
+import { eq, and, gte, lte } from "drizzle-orm";
 import { getSession, getActiveBranchFilter } from "@/lib/auth";
 
 export async function GET(request: Request) {
@@ -14,8 +14,8 @@ export async function GET(request: Request) {
     const month = searchParams.get("month"); // YYYY-MM
     const startDate = searchParams.get("startDate"); // YYYY-MM-DD
     const endDate = searchParams.get("endDate"); // YYYY-MM-DD
+    const branchIdParam = searchParams.get("branchId");
 
-    let filterMonth = month;
     let filterStartDate = startDate;
     let filterEndDate = endDate;
 
@@ -30,16 +30,38 @@ export async function GET(request: Request) {
       filterEndDate = `${year}-${m}-${lastDay}`;
     }
 
-    const branchFilter = await getActiveBranchFilter();
+    // Determine strict branch filter:
+    // Non-super-admin users CANNOT access other branches under any circumstances.
+    let branchFilter: string | null = null;
+    if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR") {
+      branchFilter = session.branchId;
+    } else {
+      if (branchIdParam !== null && branchIdParam !== undefined) {
+        branchFilter = branchIdParam === "ALL" ? null : branchIdParam;
+      } else {
+        branchFilter = await getActiveBranchFilter();
+      }
+    }
 
-    // Konversi filterStartDate dan filterEndDate ke format ISO UTC dengan asumsi zona waktu Jakarta (+07:00)
+    // Konversi filterStartDate dan filterEndDate ke format ISO UTC (+07:00 WIB)
     const startIso = new Date(`${filterStartDate}T00:00:00+07:00`).toISOString();
     const endIso = new Date(`${filterEndDate}T23:59:59.999+07:00`).toISOString();
 
-    // 1. Pre-fetch semua komisi dan kunjungan bulan ini (untuk mencari terapis yang aktif di cabang ini meskipun sudah pindah)
+    // 1. Fetch active therapists strictly isolated by branch to prevent cross-branch leakage
+    const therapistConditions = [eq(therapists.isActive, true)];
+    if (branchFilter) {
+      therapistConditions.push(eq(therapists.branchId, branchFilter));
+    }
+
+    const activeTherapists = await db
+      .select()
+      .from(therapists)
+      .where(and(...therapistConditions));
+
+    // 2. Pre-fetch commissions & visits for the period, strictly scoped to branch if filtered
     const visitConditions = [
       gte(patientVisits.visitDate, startIso),
-      lte(patientVisits.visitDate, endIso)
+      lte(patientVisits.visitDate, endIso),
     ];
     if (branchFilter) {
       visitConditions.push(eq(patientVisits.branchId, branchFilter));
@@ -48,6 +70,7 @@ export async function GET(request: Request) {
     const allMonthCommissions = await db
       .select({
         therapistId: therapistCommissions.therapistId,
+        branchId: patientVisits.branchId,
         amount: therapistCommissions.amount,
       })
       .from(therapistCommissions)
@@ -55,7 +78,10 @@ export async function GET(request: Request) {
       .where(and(...visitConditions));
 
     const allMonthVisits = await db
-      .select({ therapistId: patientVisits.therapistId })
+      .select({
+        therapistId: patientVisits.therapistId,
+        branchId: patientVisits.branchId,
+      })
       .from(patientVisits)
       .where(
         and(
@@ -64,16 +90,8 @@ export async function GET(request: Request) {
         )
       );
 
-    const activeTherapistIds = new Set<string>();
-    allMonthCommissions.forEach(c => activeTherapistIds.add(c.therapistId));
-    allMonthVisits.forEach(v => activeTherapistIds.add(v.therapistId));
-
-    // 2. Fetch therapists in the active branch OR who have activity in this branch
-    const { inArray, or } = await import("drizzle-orm");
-    
-    // Dapatkan ID terapis yang sudah punya rapor bulan ini
-    // If using month, match month. If custom, maybe match startDate and endDate.
-    const reportConditions = [];
+    // 3. Pre-fetch saved reports for the period, strictly filtered by branch if active
+    const reportConditions: any[] = [];
     if (month) {
       reportConditions.push(eq(therapistMonthlyReports.month, month));
     } else {
@@ -84,86 +102,70 @@ export async function GET(request: Request) {
         )
       );
     }
-    
+    if (branchFilter) {
+      reportConditions.push(eq(therapistMonthlyReports.branchId, branchFilter));
+    }
+
     const savedReports = await db
       .select()
       .from(therapistMonthlyReports)
       .where(and(...reportConditions));
 
-    const savedReportsMap = new Map(savedReports.map(r => [r.therapistId, r]));
-
-    const idsToInclude = new Set<string>(activeTherapistIds);
-    savedReports.forEach(r => idsToInclude.add(r.therapistId));
-    const idsArray = Array.from(idsToInclude);
-
-    const therapistConditions = [];
-    if (branchFilter) {
-      if (idsArray.length > 0) {
-        therapistConditions.push(
-          or(
-            and(eq(therapists.branchId, branchFilter), eq(therapists.isActive, true)),
-            inArray(therapists.id, idsArray)
-          )
-        );
-      } else {
-        therapistConditions.push(and(eq(therapists.branchId, branchFilter), eq(therapists.isActive, true)));
+    const savedReportsMap = new Map<string, typeof savedReports[0]>();
+    savedReports.forEach((r) => {
+      savedReportsMap.set(`${r.therapistId}_${r.branchId || "none"}`, r);
+      if (!savedReportsMap.has(r.therapistId)) {
+        savedReportsMap.set(r.therapistId, r);
       }
-    } else {
-      if (idsArray.length > 0) {
-        therapistConditions.push(
-          or(
-            eq(therapists.isActive, true),
-            inArray(therapists.id, idsArray)
-          )
-        );
-      } else {
-        therapistConditions.push(eq(therapists.isActive, true));
-      }
-    }
+    });
 
-    const activeTherapists = await db
-      .select()
-      .from(therapists)
-      .where(therapistConditions.length > 0 ? and(...therapistConditions) : undefined);
+    // 4. Pre-fetch branch names for clean display
+    const allBranches = await db.select({ id: branches.id, name: branches.name }).from(branches);
+    const branchNameMap = new Map(allBranches.map((b) => [b.id, b.name]));
 
-    // (Sudah di-fetch di atas, kita gunakan variabel yang sama)
-
-    // 4. For each therapist, map existing report or calculate defaults
+    // 5. Build report per therapist with branch isolation
     const data = await Promise.all(
       activeTherapists.map(async (t) => {
-        // Selalu hitung komisi & treatment aktual dari DB (tidak boleh stale)
+        // Calculate commissions & treatments for this therapist, respecting their branch
         const actualCommissions = allMonthCommissions
-          .filter(c => c.therapistId === t.id)
+          .filter((c) => c.therapistId === t.id && (!t.branchId || c.branchId === t.branchId))
           .reduce((sum, c) => sum + c.amount, 0);
-        const actualTreatments = allMonthVisits.filter(v => v.therapistId === t.id).length;
 
-        const saved = savedReportsMap.get(t.id);
+        const actualTreatments = allMonthVisits
+          .filter((v) => v.therapistId === t.id && (!t.branchId || v.branchId === t.branchId))
+          .length;
+
+        const reportKey = `${t.id}_${t.branchId || "none"}`;
+        const saved = savedReportsMap.get(reportKey) || savedReportsMap.get(t.id);
+
         if (saved) {
-          // Laporan tersimpan: override commissions & totalTreatments dengan data aktual
           const newTakeHomePay = saved.baseSalary + actualCommissions + saved.allowances + saved.bonuses - saved.deductions;
           return {
             ...saved,
             therapistName: t.name,
-            branchId: t.branchId,
-            commissions: actualCommissions,          // ← selalu real-time
-            totalTreatments: actualTreatments,       // ← selalu real-time
-            takeHomePay: newTakeHomePay,             // ← dihitung ulang
+            branchId: t.branchId || saved.branchId,
+            branchName: branchNameMap.get(t.branchId || saved.branchId || "") || "Tanpa Cabang",
+            commissions: actualCommissions,
+            totalTreatments: actualTreatments,
+            takeHomePay: newTakeHomePay,
             isSaved: true,
           };
         }
 
-        // Auto-calculate for unsaved reports
-        // A. Attendance counts
+        // Attendance strictly isolated by therapist and branch
+        const attendanceConditions = [
+          eq(attendance.therapistId, t.id),
+          gte(attendance.date, filterStartDate as string),
+          lte(attendance.date, filterEndDate as string),
+        ];
+        if (t.branchId) {
+          attendanceConditions.push(eq(attendance.branchId, t.branchId));
+        }
+
         const attendanceLogs = await db
           .select({ status: attendance.status })
           .from(attendance)
-          .where(
-            and(
-              eq(attendance.therapistId, t.id),
-              gte(attendance.date, filterStartDate as string),
-              lte(attendance.date, filterEndDate as string)
-            )
-          );
+          .where(and(...attendanceConditions));
 
         let present = 0;
         let late = 0;
@@ -181,6 +183,7 @@ export async function GET(request: Request) {
           therapistId: t.id,
           therapistName: t.name,
           branchId: t.branchId,
+          branchName: branchNameMap.get(t.branchId || "") || "Tanpa Cabang",
           month,
           startDate: filterStartDate,
           endDate: filterEndDate,
@@ -203,7 +206,6 @@ export async function GET(request: Request) {
         };
       })
     );
-
 
     return Response.json({ data });
   } catch (error) {
@@ -248,6 +250,8 @@ export async function POST(request: Request) {
       return Response.json({ error: "Data terapis dan bulan/rentang tanggal wajib diisi" }, { status: 400 });
     }
 
+    // Determine target branch
+    const targetBranchId = branchId || (session.role !== "SUPER_ADMIN" ? session.branchId : null);
     const now = new Date().toISOString();
 
     if (id) {
@@ -255,6 +259,7 @@ export async function POST(request: Request) {
       await db
         .update(therapistMonthlyReports)
         .set({
+          branchId: targetBranchId || undefined,
           startDate: startDate || null,
           endDate: endDate || null,
           totalTreatments: parseInt(totalTreatments) || 0,
@@ -285,7 +290,7 @@ export async function POST(request: Request) {
             eq(therapistMonthlyReports.startDate, startDate),
             eq(therapistMonthlyReports.endDate, endDate)
           );
-      const branchCondition = branchId ? eq(therapistMonthlyReports.branchId, branchId) : undefined;
+      const branchCondition = targetBranchId ? eq(therapistMonthlyReports.branchId, targetBranchId) : undefined;
 
       const existing = await db
         .select()
@@ -301,7 +306,7 @@ export async function POST(request: Request) {
       await db.insert(therapistMonthlyReports).values({
         id: newId,
         therapistId,
-        branchId: branchId || null,
+        branchId: targetBranchId || null,
         month: month || null,
         startDate: startDate || null,
         endDate: endDate || null,
