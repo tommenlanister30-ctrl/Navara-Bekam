@@ -90,13 +90,50 @@ export async function POST(
         if (therapistRecords.length > 0) {
           const therapist = therapistRecords[0];
           
-          const commissionAmount = await calculateTherapistCommission(
-            db,
-            visit.therapistId,
-            visit.serviceId,
-            1,
-            visit.branchId
-          );
+          let commissionAmount = 0;
+          let commissionDesc = `${serviceName} - ${patientName}`;
+
+          // Check if invoice exists for this visit with multiple items/add-ons
+          const existingInv = await db.select().from(invoices).where(eq(invoices.visitId, visitId)).limit(1);
+          if (existingInv.length > 0 && existingInv[0].items) {
+            try {
+              const invItems = JSON.parse(existingInv[0].items);
+              if (Array.isArray(invItems) && invItems.length > 0) {
+                const allServices = await db.select().from(services);
+                const itemNames: string[] = [];
+                for (const item of invItems) {
+                  const itemSvc = allServices.find(
+                    s => s.id === item.serviceId || s.id === item.id || (item.name && s.name?.toLowerCase().trim() === item.name?.toLowerCase().trim())
+                  );
+                  const targetServiceId = itemSvc?.id || item.serviceId;
+                  if (targetServiceId) {
+                    const ic = await calculateTherapistCommission(
+                      db,
+                      visit.therapistId,
+                      targetServiceId,
+                      item.qty || 1,
+                      visit.branchId
+                    );
+                    commissionAmount += ic;
+                    itemNames.push(item.name || itemSvc?.name || "Layanan");
+                  }
+                }
+                if (itemNames.length > 0) {
+                  commissionDesc = `${itemNames.join(", ")} - ${patientName}`;
+                }
+              }
+            } catch (e) {}
+          }
+
+          if (commissionAmount === 0) {
+            commissionAmount = await calculateTherapistCommission(
+              db,
+              visit.therapistId,
+              visit.serviceId,
+              1,
+              visit.branchId
+            );
+          }
 
           if (commissionAmount > 0) {
             // Hapus komisi lama jika ada untuk mencegah duplikasi
@@ -108,9 +145,6 @@ export async function POST(
                 like(financeTransactions.description, "%Bagi Hasil Terapis%")
               )
             );
-
-            // Sinkronisasi manual komisi dihapus untuk menghindari race condition.
-            // Laporan bulanan akan menghitung komisi secara dinamis saat diakses (Single Source of Truth).
 
             // Komisi langsung berstatus PAID (sudah disisihkan otomatis)
             await db.insert(therapistCommissions).values({
@@ -129,7 +163,7 @@ export async function POST(
               type: "EXPENSE",
               category: "Bagi Hasil Terapis",
               amount: commissionAmount,
-              description: `Bagi Hasil Terapis (${therapist.name}) - ${serviceName} - ${patientName}`,
+              description: `Bagi Hasil Terapis (${therapist.name}) - ${commissionDesc}`,
               referenceId: visitId,
               branchId: visit.branchId,
               paymentMethod: paymentMethod,

@@ -5,6 +5,9 @@ import {
   patientVisits,
   therapistMonthlyReports,
   invoices,
+  services,
+  financeTransactions,
+  therapists,
 } from "@/lib/db/schema";
 import { eq, and, like, isNull, isNotNull, gte, lte } from "drizzle-orm";
 import crypto from "crypto";
@@ -22,6 +25,8 @@ export async function POST(request: Request) {
     }
 
     console.log("Memulai sinkronisasi ulang komisi historis...");
+
+    const allServices = await db.select().from(services);
 
     // Ambil semua komisi beserta data layanannya
     const commissions = await db
@@ -71,30 +76,69 @@ export async function POST(request: Request) {
             );
 
             // Jika ada invoice, periksa apakah ada POS add-on yang tidak memiliki record patientVisits sendiri
-            if (c.invoiceItems && c.patientId && c.visitDate) {
-              try {
-                const items = JSON.parse(c.invoiceItems);
-                if (Array.isArray(items) && items.length > 1) {
-                  const allVisits = await db.select({ serviceId: patientVisits.serviceId, id: patientVisits.id }).from(patientVisits).where(and(eq(patientVisits.patientId, c.patientId), like(patientVisits.visitDate, c.visitDate)));
-                  const matchedVisitIds = new Set();
-                  matchedVisitIds.add(c.visitId);
-                  
-                  for (const item of items) {
-                    if (item.serviceId === c.serviceId && matchedVisitIds.has(c.visitId)) {
-                      matchedVisitIds.delete(c.visitId);
-                    } else if (item.serviceId) {
-                      const match = allVisits.find(v => v.serviceId === item.serviceId && !matchedVisitIds.has(v.id));
-                      if (match) {
-                        matchedVisitIds.add(match.id);
-                      } else {
-                        const itemComm = await calculateTherapistCommission(db, c.therapistId, item.serviceId, item.qty || 1, c.branchId);
-                        correctAmount += itemComm;
+            if (c.patientId && c.visitDate) {
+              let invoiceItemsStr = c.invoiceItems;
+              const visitDatePrefix = c.visitDate.substring(0, 10);
+
+              if (!invoiceItemsStr) {
+                const invFallback = await db
+                  .select({ items: invoices.items })
+                  .from(invoices)
+                  .where(and(eq(invoices.patientId, c.patientId), like(invoices.createdAt, `${visitDatePrefix}%`)))
+                  .limit(1);
+                if (invFallback.length > 0) {
+                  invoiceItemsStr = invFallback[0].items;
+                }
+              }
+
+              if (invoiceItemsStr) {
+                try {
+                  const items = JSON.parse(invoiceItemsStr);
+                  if (Array.isArray(items) && items.length > 1) {
+                    const allVisits = await db
+                      .select({ serviceId: patientVisits.serviceId, id: patientVisits.id, therapistId: patientVisits.therapistId })
+                      .from(patientVisits)
+                      .where(and(eq(patientVisits.patientId, c.patientId), like(patientVisits.visitDate, `${visitDatePrefix}%`)));
+                    
+                    const matchedVisitIds = new Set();
+                    matchedVisitIds.add(c.visitId);
+
+                    for (const item of items) {
+                      const itemSvc = allServices.find(
+                        s => s.id === item.serviceId || s.id === item.id || (item.name && s.name?.toLowerCase().trim() === item.name?.toLowerCase().trim())
+                      );
+                      const targetServiceId = itemSvc?.id || item.serviceId;
+
+                      if (targetServiceId === c.serviceId && matchedVisitIds.has(c.visitId)) {
+                        matchedVisitIds.delete(c.visitId);
+                      } else if (targetServiceId) {
+                        const match = allVisits.find(v => v.serviceId === targetServiceId && !matchedVisitIds.has(v.id));
+                        let matchHasCommission = false;
+                        if (match) {
+                          const matchComm = await db
+                            .select({ id: therapistCommissions.id, amount: therapistCommissions.amount })
+                            .from(therapistCommissions)
+                            .where(and(eq(therapistCommissions.visitId, match.id), eq(therapistCommissions.therapistId, c.therapistId)))
+                            .limit(1);
+                          if (matchComm.length > 0 && matchComm[0].amount > 0) {
+                            matchHasCommission = true;
+                            matchedVisitIds.add(match.id);
+                          }
+                        }
+
+                        if (!matchHasCommission) {
+                          const itemComm = await calculateTherapistCommission(db, c.therapistId, targetServiceId, item.qty || 1, c.branchId);
+                          correctAmount += itemComm;
+                          if (match) {
+                            matchedVisitIds.add(match.id);
+                          }
+                        }
                       }
                     }
                   }
+                } catch (e) {
+                  console.error("Failed to parse invoice items for POS add-ons");
                 }
-              } catch (e) {
-                console.error("Failed to parse invoice items for POS add-ons");
               }
             }
           }
@@ -104,6 +148,16 @@ export async function POST(request: Request) {
               .update(therapistCommissions)
               .set({ amount: correctAmount })
               .where(eq(therapistCommissions.id, c.id));
+
+            await db
+              .update(financeTransactions)
+              .set({ amount: correctAmount })
+              .where(and(
+                eq(financeTransactions.referenceId, c.visitId),
+                eq(financeTransactions.type, "EXPENSE"),
+                like(financeTransactions.description, "%Bagi Hasil Terapis%")
+              ));
+
             fixedCount++;
             fixedDetails.push(
               `Diperbarui komisi ${c.id}: Rp ${c.amount} -> Rp ${correctAmount}`,
@@ -164,30 +218,69 @@ export async function POST(request: Request) {
               v.branchId
             );
 
-            if (v.invoiceItems && v.patientId && v.visitDate) {
-              try {
-                const items = JSON.parse(v.invoiceItems);
-                if (Array.isArray(items) && items.length > 1) {
-                  const allVisits = await db.select({ serviceId: patientVisits.serviceId, id: patientVisits.id }).from(patientVisits).where(and(eq(patientVisits.patientId, v.patientId), like(patientVisits.visitDate, v.visitDate)));
-                  const matchedVisitIds = new Set();
-                  matchedVisitIds.add(v.visitId);
-                  
-                  for (const item of items) {
-                    if (item.serviceId === v.serviceId && matchedVisitIds.has(v.visitId)) {
-                      matchedVisitIds.delete(v.visitId);
-                    } else if (item.serviceId) {
-                      const match = allVisits.find(av => av.serviceId === item.serviceId && !matchedVisitIds.has(av.id));
-                      if (match) {
-                        matchedVisitIds.add(match.id);
-                      } else {
-                        const itemComm = await calculateTherapistCommission(db, v.therapistId, item.serviceId, item.qty || 1, v.branchId);
-                        commissionAmount += itemComm;
+            if (v.patientId && v.visitDate) {
+              let invoiceItemsStr = v.invoiceItems;
+              const visitDatePrefix = v.visitDate.substring(0, 10);
+
+              if (!invoiceItemsStr) {
+                const invFallback = await db
+                  .select({ items: invoices.items })
+                  .from(invoices)
+                  .where(and(eq(invoices.patientId, v.patientId), like(invoices.createdAt, `${visitDatePrefix}%`)))
+                  .limit(1);
+                if (invFallback.length > 0) {
+                  invoiceItemsStr = invFallback[0].items;
+                }
+              }
+
+              if (invoiceItemsStr) {
+                try {
+                  const items = JSON.parse(invoiceItemsStr);
+                  if (Array.isArray(items) && items.length > 1) {
+                    const allVisits = await db
+                      .select({ serviceId: patientVisits.serviceId, id: patientVisits.id, therapistId: patientVisits.therapistId })
+                      .from(patientVisits)
+                      .where(and(eq(patientVisits.patientId, v.patientId), like(patientVisits.visitDate, `${visitDatePrefix}%`)));
+                    
+                    const matchedVisitIds = new Set();
+                    matchedVisitIds.add(v.visitId);
+
+                    for (const item of items) {
+                      const itemSvc = allServices.find(
+                        s => s.id === item.serviceId || s.id === item.id || (item.name && s.name?.toLowerCase().trim() === item.name?.toLowerCase().trim())
+                      );
+                      const targetServiceId = itemSvc?.id || item.serviceId;
+
+                      if (targetServiceId === v.serviceId && matchedVisitIds.has(v.visitId)) {
+                        matchedVisitIds.delete(v.visitId);
+                      } else if (targetServiceId) {
+                        const match = allVisits.find(av => av.serviceId === targetServiceId && !matchedVisitIds.has(av.id));
+                        let matchHasCommission = false;
+                        if (match) {
+                          const matchComm = await db
+                            .select({ id: therapistCommissions.id, amount: therapistCommissions.amount })
+                            .from(therapistCommissions)
+                            .where(and(eq(therapistCommissions.visitId, match.id), eq(therapistCommissions.therapistId, v.therapistId)))
+                            .limit(1);
+                          if (matchComm.length > 0 && matchComm[0].amount > 0) {
+                            matchHasCommission = true;
+                            matchedVisitIds.add(match.id);
+                          }
+                        }
+
+                        if (!matchHasCommission) {
+                          const itemComm = await calculateTherapistCommission(db, v.therapistId, targetServiceId, item.qty || 1, v.branchId);
+                          commissionAmount += itemComm;
+                          if (match) {
+                            matchedVisitIds.add(match.id);
+                          }
+                        }
                       }
                     }
                   }
+                } catch (e) {
+                  console.error("Failed to parse invoice items for POS add-ons in missing visits");
                 }
-              } catch (e) {
-                console.error("Failed to parse invoice items for POS add-ons in missing visits");
               }
             }
           }
@@ -205,6 +298,24 @@ export async function POST(request: Request) {
               status: commStatus,
               paidAt: commStatus === "PAID" ? new Date().toISOString() : null,
             });
+
+            // Insert finance transaction if PAID
+            if (commStatus === "PAID") {
+              const thRec = await db.select({ name: therapists.name }).from(therapists).where(eq(therapists.id, v.therapistId)).limit(1);
+              const tName = thRec[0]?.name || "Terapis";
+              await db.insert(financeTransactions).values({
+                id: crypto.randomUUID(),
+                type: "EXPENSE",
+                category: "Bagi Hasil Terapis",
+                amount: commissionAmount,
+                description: `Bagi Hasil Terapis (${tName}) - Visit ${v.visitId}`,
+                referenceId: v.visitId,
+                branchId: v.branchId,
+                paymentMethod: "CASH",
+                date: v.visitDate ? `${v.visitDate.substring(0, 10)}T12:00:00Z` : new Date().toISOString()
+              });
+            }
+
             newCount++;
             fixedDetails.push(
               `Dibuat komisi baru ${newId} untuk kunjungan ${v.visitId} sebesar Rp ${commissionAmount}`,

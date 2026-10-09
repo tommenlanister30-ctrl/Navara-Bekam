@@ -68,7 +68,12 @@ export async function GET(
       visitConditions.push(eq(patientVisits.branchId, branchFilter));
     }
 
-    const { or } = await import("drizzle-orm");
+    const { or, like } = await import("drizzle-orm");
+    const crypto = await import("crypto");
+    const { calculateTherapistCommission } = await import("@/lib/commission");
+    const { financeTransactions } = await import("@/lib/db/schema");
+
+    const allServices = await db.select().from(services);
 
     // Fetch visits for this therapist in the specified month
     // We fetch visits where the therapist is either the main therapist OR they received a commission
@@ -82,7 +87,9 @@ export async function GET(
         patientName: patients.name,
         serviceName: services.name,
         servicePrice: services.price,
+        branchId: patientVisits.branchId,
         patientVisitTherapistId: patientVisits.therapistId,
+        commissionId: therapistCommissions.id,
         commissionAmount: therapistCommissions.amount,
         commissionStatus: therapistCommissions.status,
         commissionTherapistId: therapistCommissions.therapistId,
@@ -113,7 +120,8 @@ export async function GET(
         continue;
       }
 
-      const groupKey = `${row.patientId}_${row.visitDate}_${row.visitTime}`;
+      const datePart = (row.visitDate || "").substring(0, 10);
+      const groupKey = `${row.patientId}_${datePart}_${row.visitTime}`;
 
       if (!visitsMap.has(groupKey)) {
         visitsMap.set(groupKey, {
@@ -129,6 +137,7 @@ export async function GET(
           _services: [row.serviceName],
           _prices: [row.servicePrice],
           _invoiceFound: false,
+          _processedCommissionIds: new Set<string>(),
           _processedCommissionVisitIds: new Set<string>(),
         });
       }
@@ -140,6 +149,7 @@ export async function GET(
         visit._prices.push(row.servicePrice);
       }
 
+      let invoiceCalculatedComm = 0;
       if (row.invoiceItems && !visit._invoiceFound) {
         try {
           const items = JSON.parse(row.invoiceItems);
@@ -150,17 +160,72 @@ export async function GET(
             }).join(" + ");
             visit.servicePrice = row.invoiceTotal || items.reduce((sum: number, i: any) => sum + (i.subtotal || (i.price * (i.qty || 1))), 0);
             visit._invoiceFound = true;
+
+            // Calculate expected commission across all items on this invoice for this therapist
+            for (const item of items) {
+              const itemSvc = allServices.find(
+                s => s.id === item.serviceId || s.id === item.id || (item.name && s.name?.toLowerCase().trim() === item.name?.toLowerCase().trim())
+              );
+              const targetServiceId = itemSvc?.id || item.serviceId;
+              if (targetServiceId) {
+                const itemComm = await calculateTherapistCommission(
+                  db,
+                  id,
+                  targetServiceId,
+                  item.qty || 1,
+                  row.branchId
+                );
+                invoiceCalculatedComm += itemComm;
+              }
+            }
           }
         } catch (e) {}
       }
 
-      // Add commission ONLY if it belongs to THIS therapist and we haven't processed this specific visit's commission yet
-      if (row.commissionTherapistId === id && !visit._processedCommissionVisitIds.has(row.id)) {
+      // Add commission ONLY if it belongs to THIS therapist and we haven't processed this specific commission record yet
+      const commKey = row.commissionId || row.id;
+      if (row.commissionTherapistId === id && !visit._processedCommissionIds.has(commKey)) {
         visit.commissionAmount += (row.commissionAmount || 0);
         if (row.commissionStatus) {
           visit.commissionStatus = row.commissionStatus;
         }
-        visit._processedCommissionVisitIds.add(row.id);
+        visit._processedCommissionIds.add(commKey);
+      }
+
+      // If invoice exists with multiple items/add-ons and stored commission was lower than invoice total commission,
+      // auto-heal to ensure both services get commission (e.g. Full Body + Totok Wajah)
+      if (invoiceCalculatedComm > 0 && visit.commissionAmount < invoiceCalculatedComm) {
+        const diff = invoiceCalculatedComm - visit.commissionAmount;
+        visit.commissionAmount = invoiceCalculatedComm;
+        
+        // Auto-heal DB record
+        try {
+          if (row.commissionId) {
+            await db.update(therapistCommissions)
+              .set({ amount: invoiceCalculatedComm })
+              .where(eq(therapistCommissions.id, row.commissionId));
+
+            await db.update(financeTransactions)
+              .set({ amount: invoiceCalculatedComm })
+              .where(and(
+                eq(financeTransactions.referenceId, row.id),
+                eq(financeTransactions.type, "EXPENSE"),
+                like(financeTransactions.description, "%Bagi Hasil Terapis%")
+              ));
+          } else if (row.status === "completed") {
+            const newCommId = crypto.randomUUID();
+            await db.insert(therapistCommissions).values({
+              id: newCommId,
+              therapistId: id,
+              visitId: row.id,
+              amount: invoiceCalculatedComm,
+              status: "PAID",
+              paidAt: row.visitDate ? `${datePart}T12:00:00Z` : new Date().toISOString(),
+            });
+          }
+        } catch (err) {
+          console.error("Auto-heal commission error:", err);
+        }
       }
     }
 
@@ -175,6 +240,7 @@ export async function GET(
       delete visit._services;
       delete visit._prices;
       delete visit._invoiceFound;
+      delete visit._processedCommissionIds;
       delete visit._processedCommissionVisitIds;
     }
 

@@ -99,7 +99,10 @@ export async function PATCH(
           ];
         }
 
-        // Loop items and generate commissions
+        // Loop items and calculate total commissions
+        let totalCommissionAmount = 0;
+        const itemNames: string[] = [];
+
         for (const item of itemsToProcess) {
           const serviceId = item.serviceId;
           if (!serviceId) continue;
@@ -113,56 +116,56 @@ export async function PATCH(
           );
 
           if (commissionAmount > 0) {
-            // Hapus komisi lama jika ada untuk mencegah duplikasi
-            await tx.delete(therapistCommissions).where(eq(therapistCommissions.visitId, id));
-            await tx.delete(financeTransactions).where(
-              and(
-                eq(financeTransactions.referenceId, id),
-                eq(financeTransactions.type, "EXPENSE"),
-                like(financeTransactions.description, "%Bagi Hasil Terapis%")
-              )
-            );
-
-            // Sinkronisasi manual komisi dihapus untuk menghindari race condition.
-            // Laporan bulanan akan menghitung komisi secara dinamis saat diakses (Single Source of Truth).
-
-            // Insert Commission
-            await tx.insert(therapistCommissions).values({
-              id: crypto.randomUUID(),
-              therapistId,
-              visitId: id,
-              amount: commissionAmount,
-              status: "PAID",
-              paidAt: now,
-            });
-
-            // Insert Expense Transaction
-            const commTrxId = crypto.randomUUID();
-            await tx.insert(financeTransactions).values({
-              id: commTrxId,
-              type: "EXPENSE",
-              category: "Bagi Hasil Terapis",
-              amount: commissionAmount,
-              description: `Bagi Hasil Terapis (${therapist.name}) untuk layanan ${item.name || serviceId} (Edit Kasir)`,
-              referenceId: id,
-              branchId: visit.branchId,
-              paymentMethod: "CASH",
-              date: now
-            });
-
-            // Auto Journal Entry
-            await createJournalEntry({
-              date: now,
-              description: `[Auto] Beban Bagi Hasil Terapis: ${therapist.name} - ${item.name || serviceId} (Edit Kasir)`,
-              referenceId: commTrxId,
-              debitAccountId: COA.BEBAN_KOMISI,
-              creditAccountId: COA.HUTANG_KOMISI,
-              amount: commissionAmount, 
-              tx
-            });
-
-
+            totalCommissionAmount += commissionAmount;
+            itemNames.push(item.name || serviceId);
           }
+        }
+
+        if (totalCommissionAmount > 0) {
+          // Hapus komisi lama jika ada untuk mencegah duplikasi
+          await tx.delete(therapistCommissions).where(eq(therapistCommissions.visitId, id));
+          await tx.delete(financeTransactions).where(
+            and(
+              eq(financeTransactions.referenceId, id),
+              eq(financeTransactions.type, "EXPENSE"),
+              like(financeTransactions.description, "%Bagi Hasil Terapis%")
+            )
+          );
+
+          // Insert Commission
+          await tx.insert(therapistCommissions).values({
+            id: crypto.randomUUID(),
+            therapistId,
+            visitId: id,
+            amount: totalCommissionAmount,
+            status: "PAID",
+            paidAt: now,
+          });
+
+          // Insert Expense Transaction
+          const commTrxId = crypto.randomUUID();
+          await tx.insert(financeTransactions).values({
+            id: commTrxId,
+            type: "EXPENSE",
+            category: "Bagi Hasil Terapis",
+            amount: totalCommissionAmount,
+            description: `Bagi Hasil Terapis (${therapist.name}) untuk layanan ${itemNames.join(", ")} (Edit Kasir)`,
+            referenceId: id,
+            branchId: visit.branchId,
+            paymentMethod: "CASH",
+            date: now
+          });
+
+          // Auto Journal Entry
+          await createJournalEntry({
+            date: now,
+            description: `[Auto] Beban Bagi Hasil Terapis: ${therapist.name} - ${itemNames.join(", ")} (Edit Kasir)`,
+            referenceId: commTrxId,
+            debitAccountId: COA.BEBAN_KOMISI,
+            creditAccountId: COA.HUTANG_KOMISI,
+            amount: totalCommissionAmount,
+            tx
+          });
         }
       }
 

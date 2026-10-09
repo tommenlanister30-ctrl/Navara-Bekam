@@ -76,11 +76,24 @@ export async function GET() {
       }
 
       // 2. Fix historical commissions for all therapists (even inactive ones)
+      const { invoices } = await import("@/lib/db/schema");
       const pastCommissions = await db.select().from(therapistCommissions).where(eq(therapistCommissions.therapistId, t.id));
       for (const comm of pastCommissions) {
         const visitRecords = await db.select().from(patientVisits).where(eq(patientVisits.id, comm.visitId)).limit(1);
         if (visitRecords.length > 0) {
           const visit = visitRecords[0];
+
+          // Do not overwrite visits that have multi-service invoice add-ons
+          const invRecords = await db.select().from(invoices).where(eq(invoices.visitId, visit.id)).limit(1);
+          if (invRecords.length > 0 && invRecords[0].items) {
+            try {
+              const items = JSON.parse(invRecords[0].items);
+              if (Array.isArray(items) && items.length > 1) {
+                continue;
+              }
+            } catch (e) {}
+          }
+
           const expectedComm = expandedGlobalComms.find(g => g.serviceId === visit.serviceId);
           
           if (expectedComm && expectedComm.commissionAmount !== null && expectedComm.commissionAmount !== comm.amount) {
