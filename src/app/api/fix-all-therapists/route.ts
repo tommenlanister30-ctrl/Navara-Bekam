@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { therapists, therapistCommissions, therapistServiceCommissions, financeTransactions, patientVisits, services } from "@/lib/db/schema";
 import { eq, and, like } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET() {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const allTherapists = await db.select().from(therapists);
     const activeTherapists = allTherapists.filter(t => t.isActive);
     

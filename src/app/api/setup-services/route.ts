@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { services } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET() {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const allServices = await db.select().from(services);
     
     for (const s of allServices) {

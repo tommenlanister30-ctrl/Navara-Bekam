@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { branches } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function PUT(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await context.params;
     const body = await request.json();
     const { name, address, phone, whatsappNumber, operatingHours, operatingHoursWeekend, mapUrl, isActive, brand, taxRate } = body;
@@ -38,6 +44,11 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
 
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await context.params;
 
     // Note: If branch is referenced in other tables, this might fail unless cascading delete is set up.

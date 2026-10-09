@@ -24,6 +24,11 @@ export async function DELETE(
     }
     const trx = existing[0];
 
+    // Branch isolation check
+    if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR" && session.branchId && trx.branchId !== session.branchId) {
+      return NextResponse.json({ error: "Forbidden: Transaksi bukan milik cabang Anda" }, { status: 403 });
+    }
+
     // Delete related journal entries and lines first
     const relatedJournals = await db.select({ id: journalEntries.id })
       .from(journalEntries)

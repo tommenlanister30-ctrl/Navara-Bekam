@@ -1,8 +1,9 @@
 import { db } from "@/lib/db";
 import { branches } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
-// GET /api/branches — List branches
+// GET /api/branches — List branches (public - needed by reservation/promo pages)
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -25,9 +26,14 @@ export async function GET(request: Request) {
   }
 }
 
-// POST /api/branches — Create a new branch
+// POST /api/branches — Create a new branch (SUPER_ADMIN only)
 export async function POST(request: Request) {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { id, name, address, phone, whatsappNumber, operatingHours, operatingHoursWeekend, mapUrl, isActive, brand, taxRate } = body;
 

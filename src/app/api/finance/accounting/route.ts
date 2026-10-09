@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { accounts, journalEntries, journalLines } from "@/lib/db/schema";
 import { eq, sum, desc, sql, gte, lte, and } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const searchParams = new URL(request.url).searchParams;
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");

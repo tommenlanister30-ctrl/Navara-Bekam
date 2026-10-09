@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { therapists, therapistCommissions, therapistServiceCommissions, financeTransactions, patientVisits } from "@/lib/db/schema";
 import { eq, and, ne, like } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET() {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     // 1. Find Suci
     const allTherapists = await db.select().from(therapists);
     const suci = allTherapists.find(t => t.name.toLowerCase().includes("suci"));

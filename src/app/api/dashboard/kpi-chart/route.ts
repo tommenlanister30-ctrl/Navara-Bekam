@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { monthlyTargets, financeTransactions, patientVisits } from "@/lib/db/schema";
 import { eq, and, gte, lte } from "drizzle-orm";
-import { type NextRequest } from "next/server";
-import { getActiveBranchFilter } from "@/lib/auth";
+import { getActiveBranchFilter, getSession } from "@/lib/auth";
 
 function getDaysInMonth(year: number, month: number) {
   return new Date(year, month, 0).getDate();
@@ -11,6 +10,11 @@ function getDaysInMonth(year: number, month: number) {
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const searchParams = request.nextUrl.searchParams;
     let monthStr = searchParams.get("month");
 

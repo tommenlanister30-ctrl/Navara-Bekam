@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { staffPayrollReports, staff } from "@/lib/db/schema";
 import { eq, desc, and } from "drizzle-orm";
-import { getSession } from "@/lib/auth";
+import { getSession, getActiveBranchFilter } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
@@ -18,6 +18,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Month parameter is required" }, { status: 400 });
     }
 
+    const branchFilter = await getActiveBranchFilter();
+    const conditions: any[] = [eq(staffPayrollReports.month, month)];
+    if (branchFilter) {
+      conditions.push(eq(staff.branchId, branchFilter));
+    }
+
     const reports = await db
       .select({
         report: staffPayrollReports,
@@ -25,7 +31,7 @@ export async function GET(request: Request) {
       })
       .from(staffPayrollReports)
       .leftJoin(staff, eq(staffPayrollReports.staffId, staff.id))
-      .where(eq(staffPayrollReports.month, month))
+      .where(and(...conditions))
       .orderBy(desc(staffPayrollReports.createdAt));
 
     return NextResponse.json({ success: true, data: reports });
@@ -50,6 +56,14 @@ export async function POST(request: Request) {
 
     if (!staffId || !month) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    }
+
+    // Branch isolation check
+    if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR" && session.branchId) {
+      const staffMember = await db.select().from(staff).where(eq(staff.id, staffId)).limit(1);
+      if (staffMember.length === 0 || staffMember[0].branchId !== session.branchId) {
+        return NextResponse.json({ error: "Forbidden: Karyawan bukan milik cabang Anda" }, { status: 403 });
+      }
     }
 
     // Check if already generated for this month

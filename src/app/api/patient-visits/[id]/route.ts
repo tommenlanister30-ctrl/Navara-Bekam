@@ -11,12 +11,18 @@ import {
 } from "@/lib/db/schema";
 import { eq, inArray, and } from "drizzle-orm";
 import { logSystemAction } from "@/lib/logger";
+import { getSession } from "@/lib/auth";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await params;
     const body = await request.json();
 
@@ -56,13 +62,20 @@ export async function PATCH(
       return Response.json({ success: true, message: "Kunjungan berhasil diselesaikan" });
     }
 
-    // 3. Update field lainnya jika ada
+    // 3. Update field yang aman saja (whitelist) — mencegah mass-assignment attack
+    const safeUpdate: Record<string, unknown> = {
+      updatedAt: new Date().toISOString(),
+    };
+    const allowedFields = ["bloodPressure", "notes", "visitTime", "checkInTime", "checkOutTime", "paymentStatus"];
+    for (const field of allowedFields) {
+      if (body[field] !== undefined) {
+        safeUpdate[field] = body[field];
+      }
+    }
+
     await db
       .update(patientVisits)
-      .set({
-        ...body,
-        updatedAt: new Date().toISOString(),
-      })
+      .set(safeUpdate)
       .where(eq(patientVisits.id, id));
 
     return Response.json({ success: true, message: "Data kunjungan berhasil diubah" });
@@ -77,6 +90,11 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await params;
 
     // 1. Dapatkan data visit sebelum dihapus

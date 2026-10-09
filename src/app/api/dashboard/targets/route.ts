@@ -3,10 +3,15 @@ import { db } from "@/lib/db";
 import { monthlyTargets } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { type NextRequest } from "next/server";
-import { getActiveBranchFilter } from "@/lib/auth";
+import { getActiveBranchFilter, getSession } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const searchParams = request.nextUrl.searchParams;
     let month = searchParams.get("month");
 
@@ -61,6 +66,11 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: Request) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { month, targetIncome, targetVisits, branchId: bodyBranchId } = body;
 
@@ -68,7 +78,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Month is required" }, { status: 400 });
     }
 
-    const branchId = bodyBranchId && bodyBranchId !== "ALL" ? bodyBranchId : await getActiveBranchFilter();
+    let branchId = bodyBranchId && bodyBranchId !== "ALL" ? bodyBranchId : await getActiveBranchFilter();
+    if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR") {
+      branchId = session.branchId;
+    }
+
     if (!branchId || branchId === "ALL") {
       return NextResponse.json({ error: "Silakan pilih cabang spesifik terlebih dahulu untuk mengubah target." }, { status: 400 });
     }

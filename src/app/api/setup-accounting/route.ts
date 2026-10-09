@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { accounts, financeTransactions, journalEntries, journalLines } from "@/lib/db/schema";
 import { sql } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     // 1. Setup Master Chart of Accounts (CoA)
     const initialAccounts = [
       { id: "acc_101", code: "101", name: "Kas & Bank", type: "ASSET", isActive: true },

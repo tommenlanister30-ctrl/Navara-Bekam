@@ -16,10 +16,10 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    // const session = await getSession();
-    // if (!session || session.role !== "SUPER_ADMIN") {
-    //   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    // }
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     console.log("Memulai sinkronisasi ulang komisi historis...");
 

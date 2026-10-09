@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { settings } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 // GET: Fetch company settings
 export async function GET() {
@@ -22,6 +23,11 @@ export async function GET() {
 // PUT: Update company settings
 export async function PUT(request: Request) {
   try {
+    const session = await getSession();
+    if (!session || session.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { 
       companyName, description, address, phone, email, 

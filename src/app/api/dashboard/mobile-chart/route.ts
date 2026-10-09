@@ -2,10 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { financeTransactions, patientVisits } from "@/lib/db/schema";
 import { sql, eq, and, like, gte, lt } from "drizzle-orm";
-import { getActiveBranchFilter } from "@/lib/auth";
+import { getActiveBranchFilter, getSession } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const branchFilter = await getActiveBranchFilter();
     
     // 1. Calculate Today's Revenue
