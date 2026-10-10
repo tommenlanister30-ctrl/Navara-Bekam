@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { 
-  patientVisits, 
-  invoices, 
-  therapists, 
-  therapistServiceCommissions, 
-  therapistCommissions, 
-  financeTransactions, 
-  therapistMonthlyReports 
+import {
+  patientVisits,
+  invoices,
+  therapists,
+  therapistServiceCommissions,
+  therapistCommissions,
+  financeTransactions,
+  therapistMonthlyReports
 } from "@/lib/db/schema";
 import { eq, and, like } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
@@ -58,9 +58,9 @@ export async function PATCH(
 
       // 3. Update the visit
       await tx.update(patientVisits)
-        .set({ 
+        .set({
           therapistId,
-          updatedAt: now 
+          updatedAt: now
         })
         .where(eq(patientVisits.id, id));
 
@@ -70,8 +70,8 @@ export async function PATCH(
       if (relatedInvoices.length > 0) {
         invoice = relatedInvoices[0];
         await tx.update(invoices)
-          .set({ 
-            therapistId, 
+          .set({
+            therapistId,
             therapistName: therapist.name
           })
           .where(eq(invoices.id, invoice.id));
@@ -81,7 +81,7 @@ export async function PATCH(
       if (visit.paymentStatus === "PAID") {
         // Find items to calculate commission
         let itemsToProcess = [];
-        
+
         if (invoice && invoice.items) {
           try {
             itemsToProcess = JSON.parse(invoice.items);

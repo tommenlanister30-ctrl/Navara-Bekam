@@ -103,3 +103,45 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Failed to create staff payroll" }, { status: 500 });
   }
 }
+
+export async function DELETE(request: Request) {
+  try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const reportId = searchParams.get("id");
+
+    if (!reportId) {
+      return NextResponse.json({ error: "Report ID is required" }, { status: 400 });
+    }
+
+    // Fetch the report first to validate ownership
+    const existing = await db
+      .select({ report: staffPayrollReports, staff: staff })
+      .from(staffPayrollReports)
+      .leftJoin(staff, eq(staffPayrollReports.staffId, staff.id))
+      .where(eq(staffPayrollReports.id, reportId))
+      .limit(1);
+
+    if (!existing || existing.length === 0) {
+      return NextResponse.json({ error: "Report not found" }, { status: 404 });
+    }
+
+    // Branch isolation check
+    if (session.role !== "SUPER_ADMIN" && session.role !== "INVESTOR" && session.branchId) {
+      if (existing[0].staff?.branchId !== session.branchId) {
+        return NextResponse.json({ error: "Forbidden: Karyawan bukan milik cabang Anda" }, { status: 403 });
+      }
+    }
+
+    await db.delete(staffPayrollReports).where(eq(staffPayrollReports.id, reportId));
+
+    return NextResponse.json({ success: true, message: "Payroll report deleted" });
+  } catch (error) {
+    console.error("Failed to delete staff payroll:", error);
+    return NextResponse.json({ error: "Failed to delete staff payroll" }, { status: 500 });
+  }
+}

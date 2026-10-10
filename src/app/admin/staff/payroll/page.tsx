@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download } from "lucide-react";
+import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download, Undo2, FileText } from "lucide-react";
 import PageHeader from "@/components/layout/PageHeader";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -18,6 +18,10 @@ export default function AdminStaffPayrollPage() {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [selectedStaffForPayroll, setSelectedStaffForPayroll] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
+  const [undoModalOpen, setUndoModalOpen] = useState(false);
+  const [undoTarget, setUndoTarget] = useState<any>(null);
+  const [isUndoing, setIsUndoing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   
   const [payrollForm, setPayrollForm] = useState({
     attendancePresent: 20,
@@ -112,9 +116,9 @@ export default function AdminStaffPayrollPage() {
     return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(val);
   };
 
-  const handlePrintSlip = (payrollData: any) => {
-    const doc = new jsPDF();
+  const generateSlipPage = (doc: any, payrollData: any, isFirst: boolean) => {
     const { report, staff } = payrollData;
+    if (!isFirst) doc.addPage();
 
     doc.setFontSize(20);
     doc.text("NAVARA REFLEXOLOGY", 105, 20, { align: "center" });
@@ -155,8 +159,56 @@ export default function AdminStaffPayrollPage() {
       const finalY = (doc as any).lastAutoTable.finalY + 10;
       doc.text(`Catatan: ${report.notes}`, 14, finalY);
     }
+  };
 
-    doc.save(`Slip_Gaji_${staff.name}_${report.month}.pdf`);
+  const handlePrintSlip = (payrollData: any) => {
+    const doc = new jsPDF();
+    generateSlipPage(doc, payrollData, true);
+    doc.save(`Slip_Gaji_${payrollData.staff.name}_${payrollData.report.month}.pdf`);
+  };
+
+  const handleExportAllPDF = () => {
+    if (payrolls.length === 0) return;
+    setIsExporting(true);
+    try {
+      const doc = new jsPDF();
+      payrolls.forEach((payrollData, index) => {
+        generateSlipPage(doc, payrollData, index === 0);
+      });
+      doc.save(`Slip_Gaji_Semua_Staff_${selectedMonth}.pdf`);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleOpenUndo = (payrollData: any) => {
+    setUndoTarget(payrollData);
+    setUndoModalOpen(true);
+  };
+
+  const handleUndoPayroll = async () => {
+    if (!undoTarget) return;
+    setIsUndoing(true);
+    try {
+      const res = await fetch(`/api/staff-payroll?id=${undoTarget.report.id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setUndoModalOpen(false);
+        setUndoTarget(null);
+        fetchData();
+      } else {
+        const data = await res.json();
+        alert(data.error || "Gagal menghapus slip gaji");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Terjadi kesalahan saat menghapus slip gaji");
+    } finally {
+      setIsUndoing(false);
+    }
   };
 
   const getStaffPayrollReport = (staffId: string) => {
@@ -172,8 +224,14 @@ export default function AdminStaffPayrollPage() {
           icon={Receipt}
           rightContent={
             <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto mt-4 md:mt-0">
-
-
+              <button
+                onClick={handleExportAllPDF}
+                disabled={payrolls.length === 0 || isExporting}
+                className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/30 text-emerald-100 rounded-xl text-sm font-bold inline-flex items-center gap-2 backdrop-blur-md transition-all disabled:opacity-40 disabled:cursor-not-allowed w-full sm:w-auto justify-center"
+              >
+                <FileText className="w-4 h-4" />
+                {isExporting ? "Mengekspor..." : "Export PDF"}
+              </button>
               <input 
                 type="month" 
                 value={selectedMonth}
@@ -224,12 +282,21 @@ export default function AdminStaffPayrollPage() {
                         </td>
                         <td className="px-6 py-4 text-right">
                           {reportData ? (
-                            <button
-                              onClick={() => handlePrintSlip(reportData)}
-                              className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
-                            >
-                              <Download className="w-4 h-4" /> Cetak Slip
-                            </button>
+                            <div className="flex items-center gap-2 justify-end">
+                              <button
+                                onClick={() => handlePrintSlip(reportData)}
+                                className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
+                              >
+                                <Download className="w-4 h-4" /> Cetak Slip
+                              </button>
+                              <button
+                                onClick={() => handleOpenUndo(reportData)}
+                                className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
+                                title="Undo / Hapus Slip Gaji"
+                              >
+                                <Undo2 className="w-4 h-4" /> Undo
+                              </button>
+                            </div>
                           ) : (
                             <button
                               onClick={() => handleOpenGenerate(staff)}
@@ -315,6 +382,46 @@ export default function AdminStaffPayrollPage() {
                     </button>
                   </div>
                 </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Undo Confirmation Modal */}
+        {undoModalOpen && undoTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={() => setUndoModalOpen(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="bg-gradient-to-r from-red-600 to-red-700 p-5 text-white">
+                <h3 className="text-lg font-extrabold flex items-center gap-2">
+                  <Undo2 className="w-5 h-5" /> Undo Slip Gaji
+                </h3>
+              </div>
+              <div className="p-6 space-y-4">
+                <p className="text-gray-700 text-sm">
+                  Apakah Anda yakin ingin menghapus slip gaji <span className="font-bold text-gray-900">{undoTarget.staff?.name}</span> untuk periode <span className="font-bold text-gray-900">{undoTarget.report?.month}</span>?
+                </p>
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <p className="text-xs text-amber-800 font-medium">
+                    ⚠️ Data slip gaji akan dihapus dan status akan kembali ke "Belum Dibuat". Anda bisa membuat ulang slip gaji setelahnya.
+                  </p>
+                </div>
+                <div className="flex gap-3 justify-end pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setUndoModalOpen(false)}
+                    className="px-5 py-2 rounded-lg text-gray-600 font-bold hover:bg-gray-100 transition-colors"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleUndoPayroll}
+                    disabled={isUndoing}
+                    className="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-lg font-bold inline-flex items-center gap-2 transition-colors disabled:opacity-50"
+                  >
+                    {isUndoing ? "Menghapus..." : "Ya, Hapus Slip"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
