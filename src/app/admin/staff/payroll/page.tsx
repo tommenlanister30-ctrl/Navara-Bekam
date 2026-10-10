@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download, Undo2, FileText } from "lucide-react";
+import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download, Undo2, FileText, Pencil, AlertCircle } from "lucide-react";
 import PageHeader from "@/components/layout/PageHeader";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -17,6 +17,8 @@ export default function AdminStaffPayrollPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [selectedStaffForPayroll, setSelectedStaffForPayroll] = useState<any>(null);
+  const [isEditingReport, setIsEditingReport] = useState(false);
+  const [updateStaffBaseSalary, setUpdateStaffBaseSalary] = useState(true);
   const [session, setSession] = useState<any>(null);
   const [undoModalOpen, setUndoModalOpen] = useState(false);
   const [undoTarget, setUndoTarget] = useState<any>(null);
@@ -65,19 +67,36 @@ export default function AdminStaffPayrollPage() {
     fetchData();
   }, [selectedMonth]);
 
-  const handleOpenGenerate = (staff: any) => {
+  const handleOpenPayroll = (staff: any, existingReportData: any = null) => {
     setSelectedStaffForPayroll(staff);
-    const allowances = staff.dailyAllowance * 20; // Default 20 days present
-    setPayrollForm({
-      attendancePresent: 20,
-      attendanceLate: 0,
-      attendanceAbsent: 0,
-      baseSalary: staff.baseSalary,
-      allowances: allowances,
-      bonuses: 0,
-      deductions: 0,
-      notes: "",
-    });
+    setIsEditingReport(!!existingReportData);
+    setUpdateStaffBaseSalary(true);
+
+    if (existingReportData?.report) {
+      const rep = existingReportData.report;
+      setPayrollForm({
+        attendancePresent: rep.attendancePresent ?? 20,
+        attendanceLate: rep.attendanceLate ?? 0,
+        attendanceAbsent: rep.attendanceAbsent ?? 0,
+        baseSalary: rep.baseSalary || staff.baseSalary || 0,
+        allowances: rep.allowances ?? ((staff.dailyAllowance || 0) * (rep.attendancePresent ?? 20)),
+        bonuses: rep.bonuses ?? 0,
+        deductions: rep.deductions ?? 0,
+        notes: rep.notes || "",
+      });
+    } else {
+      const allowances = (staff.dailyAllowance || 0) * 20; // Default 20 days present
+      setPayrollForm({
+        attendancePresent: 20,
+        attendanceLate: 0,
+        attendanceAbsent: 0,
+        baseSalary: staff.baseSalary || 0,
+        allowances: allowances,
+        bonuses: 0,
+        deductions: 0,
+        notes: "",
+      });
+    }
     setGenerateModalOpen(true);
   };
 
@@ -85,19 +104,26 @@ export default function AdminStaffPayrollPage() {
     e.preventDefault();
     setIsGenerating(true);
     try {
-      await fetch("/api/staff-payroll", {
+      const res = await fetch("/api/staff-payroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           staffId: selectedStaffForPayroll.id,
           month: selectedMonth,
-          ...payrollForm
+          ...payrollForm,
+          updateStaffBaseSalary,
         })
       });
-      setGenerateModalOpen(false);
-      fetchData();
+      if (res.ok) {
+        setGenerateModalOpen(false);
+        fetchData();
+      } else {
+        const errJson = await res.json();
+        alert(errJson.error || "Gagal menyimpan slip gaji");
+      }
     } catch (err) {
       console.error(err);
+      alert("Terjadi kesalahan saat menyimpan slip gaji");
     } finally {
       setIsGenerating(false);
     }
@@ -267,7 +293,32 @@ export default function AdminStaffPayrollPage() {
                           <div className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded w-max mt-1">{staff.role}</div>
                         </td>
                         <td className="px-6 py-4 text-gray-700 font-medium">
-                          {formatRupiah(staff.baseSalary)}
+                          {reportData ? (
+                            <div>
+                              <div className="font-bold text-gray-900">
+                                {formatRupiah(reportData.report.baseSalary || staff.baseSalary || 0)}
+                                {(!reportData.report.baseSalary && !staff.baseSalary) && (
+                                  <span className="ml-2 inline-flex items-center text-[10px] text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full font-bold">
+                                    Perlu Diisi
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-emerald-600 font-semibold mt-0.5">
+                                THP: {formatRupiah(reportData.report.takeHomePay)}
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <span className={staff.baseSalary > 0 ? "font-bold text-gray-900" : "text-gray-400"}>
+                                {formatRupiah(staff.baseSalary || 0)}
+                              </span>
+                              {(!staff.baseSalary || staff.baseSalary === 0) && (
+                                <span className="ml-2 inline-flex items-center text-[10px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full font-medium">
+                                  Belum diset
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4 text-center">
                           {reportData ? (
@@ -285,13 +336,21 @@ export default function AdminStaffPayrollPage() {
                             <div className="flex items-center gap-2 justify-end">
                               <button
                                 onClick={() => handlePrintSlip(reportData)}
-                                className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
+                                className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-1.5"
+                                title="Cetak / Download Slip"
                               >
-                                <Download className="w-4 h-4" /> Cetak Slip
+                                <Download className="w-4 h-4" /> Cetak
+                              </button>
+                              <button
+                                onClick={() => handleOpenPayroll(staff, reportData)}
+                                className="bg-amber-50 hover:bg-amber-100 text-amber-700 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-1.5"
+                                title="Edit Slip Gaji"
+                              >
+                                <Pencil className="w-4 h-4" /> Edit
                               </button>
                               <button
                                 onClick={() => handleOpenUndo(reportData)}
-                                className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
+                                className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-1.5"
                                 title="Undo / Hapus Slip Gaji"
                               >
                                 <Undo2 className="w-4 h-4" /> Undo
@@ -299,7 +358,7 @@ export default function AdminStaffPayrollPage() {
                             </div>
                           ) : (
                             <button
-                              onClick={() => handleOpenGenerate(staff)}
+                              onClick={() => handleOpenPayroll(staff)}
                               className="bg-primary hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2"
                             >
                               <Receipt className="w-4 h-4" /> Buat Slip Gaji
@@ -315,14 +374,16 @@ export default function AdminStaffPayrollPage() {
           )}
         </div>
 
-        {/* Generate Modal */}
+        {/* Generate / Edit Modal */}
         {generateModalOpen && selectedStaffForPayroll && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={() => setGenerateModalOpen(false)}>
             <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
               <div className="shrink-0 bg-gradient-to-r from-blue-900 to-indigo-900 p-6 text-white flex justify-between items-center shadow-md">
                 <div>
-                  <h3 className="text-xl font-extrabold">Buat Slip Gaji: {selectedStaffForPayroll.name}</h3>
-                  <p className="text-blue-200 text-xs mt-1">Periode: {selectedMonth}</p>
+                  <h3 className="text-xl font-extrabold">
+                    {isEditingReport ? "Edit Slip Gaji" : "Buat Slip Gaji"}: {selectedStaffForPayroll.name}
+                  </h3>
+                  <p className="text-blue-200 text-xs mt-1">Periode: {selectedMonth} &bull; Jabatan: {selectedStaffForPayroll.role}</p>
                 </div>
               </div>
 
@@ -333,7 +394,7 @@ export default function AdminStaffPayrollPage() {
                       <label className="text-xs font-bold text-gray-700">Kehadiran (Hari)</label>
                       <input type="number" value={payrollForm.attendancePresent} onChange={e => {
                         const days = parseInt(e.target.value) || 0;
-                        setPayrollForm({...payrollForm, attendancePresent: days, allowances: days * selectedStaffForPayroll.dailyAllowance});
+                        setPayrollForm({...payrollForm, attendancePresent: days, allowances: days * (selectedStaffForPayroll.dailyAllowance || 0)});
                       }} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary/20" />
                     </div>
                     <div className="space-y-2">
@@ -348,8 +409,21 @@ export default function AdminStaffPayrollPage() {
 
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-xs font-bold text-gray-700">Gaji Pokok (Rp)</label>
-                      <input type="number" value={payrollForm.baseSalary} onChange={e => setPayrollForm({...payrollForm, baseSalary: parseInt(e.target.value) || 0})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary/20" />
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-gray-700">Gaji Pokok (Rp)</label>
+                        {payrollForm.baseSalary === 0 && (
+                          <span className="text-[11px] font-bold text-amber-600 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3" /> Nominal masih 0
+                          </span>
+                        )}
+                      </div>
+                      <input 
+                        type="number" 
+                        value={payrollForm.baseSalary} 
+                        onChange={e => setPayrollForm({...payrollForm, baseSalary: parseInt(e.target.value) || 0})} 
+                        placeholder="Masukkan gaji pokok"
+                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary/20 font-semibold" 
+                      />
                     </div>
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-gray-700">Uang Makan/Transport Total (Rp)</label>
@@ -365,6 +439,19 @@ export default function AdminStaffPayrollPage() {
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-2 bg-blue-50/70 border border-blue-200/60 p-3 rounded-xl">
+                    <input
+                      type="checkbox"
+                      id="updateStaffBaseSalary"
+                      checked={updateStaffBaseSalary}
+                      onChange={e => setUpdateStaffBaseSalary(e.target.checked)}
+                      className="h-4 w-4 text-primary rounded cursor-pointer"
+                    />
+                    <label htmlFor="updateStaffBaseSalary" className="text-xs text-blue-900 font-medium cursor-pointer">
+                      Simpan nominal ini sebagai Gaji Pokok profil karyawan (otomatis terisi untuk bulan berikutnya)
+                    </label>
+                  </div>
+
                   <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-xl flex justify-between items-center">
                     <span className="font-bold text-indigo-900">Total Take Home Pay:</span>
                     <span className="text-2xl font-black text-indigo-700">{formatRupiah(calculateTakeHomePay())}</span>
@@ -378,7 +465,7 @@ export default function AdminStaffPayrollPage() {
                   <div className="flex gap-4 justify-end pt-4">
                     <button type="button" onClick={() => setGenerateModalOpen(false)} className="px-6 py-2 rounded-lg text-gray-600 font-bold">Batal</button>
                     <button type="submit" disabled={isGenerating} className="bg-primary text-white px-8 py-2 rounded-lg font-bold flex items-center gap-2">
-                      {isGenerating ? "Menyimpan..." : "Simpan Slip Gaji"}
+                      {isGenerating ? "Menyimpan..." : (isEditingReport ? "Update Slip Gaji" : "Simpan Slip Gaji")}
                     </button>
                   </div>
                 </form>

@@ -51,7 +51,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { 
       staffId, month, attendancePresent, attendanceLate, attendanceAbsent, 
-      baseSalary, allowances, bonuses, deductions, notes 
+      baseSalary, allowances, bonuses, deductions, notes, updateStaffBaseSalary = true
     } = body;
 
     if (!staffId || !month) {
@@ -66,42 +66,70 @@ export async function POST(request: Request) {
       }
     }
 
+    const parsedBaseSalary = typeof baseSalary === "number" ? baseSalary : (parseInt(baseSalary) || 0);
+    const parsedAllowances = typeof allowances === "number" ? allowances : (parseInt(allowances) || 0);
+    const parsedBonuses = typeof bonuses === "number" ? bonuses : (parseInt(bonuses) || 0);
+    const parsedDeductions = typeof deductions === "number" ? deductions : (parseInt(deductions) || 0);
+    const takeHomePay = parsedBaseSalary + parsedAllowances + parsedBonuses - parsedDeductions;
+
     // Check if already generated for this month
     const existing = await db
       .select()
       .from(staffPayrollReports)
       .where(and(eq(staffPayrollReports.staffId, staffId), eq(staffPayrollReports.month, month)));
 
+    let savedReport;
     if (existing && existing.length > 0) {
-      return NextResponse.json({ error: "Payroll report already generated for this staff in this month" }, { status: 400 });
+      // Update existing report
+      const updateData = {
+        attendancePresent: attendancePresent !== undefined ? attendancePresent : existing[0].attendancePresent,
+        attendanceLate: attendanceLate !== undefined ? attendanceLate : existing[0].attendanceLate,
+        attendanceAbsent: attendanceAbsent !== undefined ? attendanceAbsent : existing[0].attendanceAbsent,
+        baseSalary: parsedBaseSalary,
+        allowances: parsedAllowances,
+        bonuses: parsedBonuses,
+        deductions: parsedDeductions,
+        takeHomePay,
+        notes: notes !== undefined ? notes : existing[0].notes,
+        updatedAt: new Date().toISOString(),
+      };
+      await db.update(staffPayrollReports).set(updateData).where(eq(staffPayrollReports.id, existing[0].id));
+      savedReport = { ...existing[0], ...updateData };
+    } else {
+      // Insert new report
+      savedReport = {
+        id: crypto.randomUUID(),
+        staffId,
+        month,
+        attendancePresent: attendancePresent || 0,
+        attendanceLate: attendanceLate || 0,
+        attendanceAbsent: attendanceAbsent || 0,
+        baseSalary: parsedBaseSalary,
+        allowances: parsedAllowances,
+        bonuses: parsedBonuses,
+        deductions: parsedDeductions,
+        takeHomePay,
+        notes: notes || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.insert(staffPayrollReports).values(savedReport);
     }
 
-    const takeHomePay = (baseSalary || 0) + (allowances || 0) + (bonuses || 0) - (deductions || 0);
+    // Sync base salary to staff master data if desired and base salary is set
+    if (updateStaffBaseSalary && parsedBaseSalary > 0) {
+      await db.update(staff).set({ baseSalary: parsedBaseSalary }).where(eq(staff.id, staffId));
+    }
 
-    const newReport = {
-      id: crypto.randomUUID(),
-      staffId,
-      month,
-      attendancePresent: attendancePresent || 0,
-      attendanceLate: attendanceLate || 0,
-      attendanceAbsent: attendanceAbsent || 0,
-      baseSalary: baseSalary || 0,
-      allowances: allowances || 0,
-      bonuses: bonuses || 0,
-      deductions: deductions || 0,
-      takeHomePay,
-      notes: notes || null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    await db.insert(staffPayrollReports).values(newReport);
-
-    return NextResponse.json({ success: true, data: newReport }, { status: 201 });
+    return NextResponse.json({ success: true, data: savedReport }, { status: 200 });
   } catch (error) {
-    console.error("Failed to create staff payroll:", error);
-    return NextResponse.json({ error: "Failed to create staff payroll" }, { status: 500 });
+    console.error("Failed to save staff payroll:", error);
+    return NextResponse.json({ error: "Failed to save staff payroll" }, { status: 500 });
   }
+}
+
+export async function PUT(request: Request) {
+  return POST(request);
 }
 
 export async function DELETE(request: Request) {
