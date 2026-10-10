@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download, Undo2, FileText, Pencil, AlertCircle } from "lucide-react";
+import { Receipt, Calendar as CalendarIcon, CheckCircle, Search, User, Download, Undo2, FileText, Pencil, AlertCircle, Clock } from "lucide-react";
 import PageHeader from "@/components/layout/PageHeader";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -18,6 +18,7 @@ export default function AdminStaffPayrollPage() {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [selectedStaffForPayroll, setSelectedStaffForPayroll] = useState<any>(null);
   const [isEditingReport, setIsEditingReport] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<"PAID" | "PENDING">("PAID");
   const [updateStaffBaseSalary, setUpdateStaffBaseSalary] = useState(true);
   const [session, setSession] = useState<any>(null);
   const [undoModalOpen, setUndoModalOpen] = useState(false);
@@ -35,6 +36,17 @@ export default function AdminStaffPayrollPage() {
     deductions: 0,
     notes: "",
   });
+
+  const getPaymentStatus = (report: any): "PAID" | "PENDING" => {
+    if (!report) return "PENDING";
+    if (report.notes?.includes("[STATUS:PENDING]")) return "PENDING";
+    return "PAID";
+  };
+
+  const getCleanNotes = (notes?: string | null) => {
+    if (!notes) return "";
+    return notes.replace(/\[STATUS:(PAID|PENDING)\]/g, "").trim();
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -74,6 +86,7 @@ export default function AdminStaffPayrollPage() {
 
     if (existingReportData?.report) {
       const rep = existingReportData.report;
+      setPaymentStatus(getPaymentStatus(rep));
       setPayrollForm({
         attendancePresent: rep.attendancePresent ?? 20,
         attendanceLate: rep.attendanceLate ?? 0,
@@ -82,9 +95,10 @@ export default function AdminStaffPayrollPage() {
         allowances: rep.allowances ?? ((staff.dailyAllowance || 0) * (rep.attendancePresent ?? 20)),
         bonuses: rep.bonuses ?? 0,
         deductions: rep.deductions ?? 0,
-        notes: rep.notes || "",
+        notes: getCleanNotes(rep.notes),
       });
     } else {
+      setPaymentStatus("PAID");
       const allowances = (staff.dailyAllowance || 0) * 20; // Default 20 days present
       setPayrollForm({
         attendancePresent: 20,
@@ -104,6 +118,9 @@ export default function AdminStaffPayrollPage() {
     e.preventDefault();
     setIsGenerating(true);
     try {
+      const userNotes = getCleanNotes(payrollForm.notes);
+      const fullNotes = userNotes ? `${userNotes} [STATUS:${paymentStatus}]` : `[STATUS:${paymentStatus}]`;
+
       const res = await fetch("/api/staff-payroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -111,6 +128,7 @@ export default function AdminStaffPayrollPage() {
           staffId: selectedStaffForPayroll.id,
           month: selectedMonth,
           ...payrollForm,
+          notes: fullNotes,
           updateStaffBaseSalary,
         })
       });
@@ -126,6 +144,39 @@ export default function AdminStaffPayrollPage() {
       alert("Terjadi kesalahan saat menyimpan slip gaji");
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleToggleStatus = async (reportData: any) => {
+    if (!reportData?.report) return;
+    const currentStatus = getPaymentStatus(reportData.report);
+    const newStatus = currentStatus === "PAID" ? "PENDING" : "PAID";
+    const cleanNotes = getCleanNotes(reportData.report.notes);
+    const updatedNotes = cleanNotes ? `${cleanNotes} [STATUS:${newStatus}]` : `[STATUS:${newStatus}]`;
+
+    try {
+      const res = await fetch("/api/staff-payroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          staffId: reportData.report.staffId,
+          month: reportData.report.month,
+          attendancePresent: reportData.report.attendancePresent,
+          attendanceLate: reportData.report.attendanceLate,
+          attendanceAbsent: reportData.report.attendanceAbsent,
+          baseSalary: reportData.report.baseSalary,
+          allowances: reportData.report.allowances,
+          bonuses: reportData.report.bonuses,
+          deductions: reportData.report.deductions,
+          notes: updatedNotes,
+          updateStaffBaseSalary: false,
+        }),
+      });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -166,6 +217,10 @@ export default function AdminStaffPayrollPage() {
     doc.text(`- Terlambat: ${report.attendanceLate} Hari`, 125, 69);
     doc.text(`- Absen: ${report.attendanceAbsent} Hari`, 125, 76);
 
+    const slipStatus = getPaymentStatus(report) === "PAID" ? "SUDAH DIBAYARKAN" : "PENDING";
+    doc.setFontSize(10);
+    doc.text(`Status: ${slipStatus}`, 14, 72);
+
     autoTable(doc, {
       startY: 85,
       head: [["Keterangan", "Nominal"]],
@@ -181,9 +236,10 @@ export default function AdminStaffPayrollPage() {
       footStyles: { fillColor: [46, 204, 113], textColor: [255, 255, 255] }
     });
 
-    if (report.notes) {
+    const cleanNotes = getCleanNotes(report.notes);
+    if (cleanNotes) {
       const finalY = (doc as any).lastAutoTable.finalY + 10;
-      doc.text(`Catatan: ${report.notes}`, 14, finalY);
+      doc.text(`Catatan: ${cleanNotes}`, 14, finalY);
     }
   };
 
@@ -322,12 +378,26 @@ export default function AdminStaffPayrollPage() {
                         </td>
                         <td className="px-6 py-4 text-center">
                           {reportData ? (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">
-                              <CheckCircle className="w-3.5 h-3.5" /> Sudah Dibuat
-                            </span>
+                            getPaymentStatus(reportData.report) === "PAID" ? (
+                              <button
+                                onClick={() => handleToggleStatus(reportData)}
+                                title="Status: Sudah Dibayarkan. Klik untuk ubah menjadi Pending."
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-colors cursor-pointer"
+                              >
+                                <CheckCircle className="w-3.5 h-3.5" /> Sudah Dibayarkan
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleToggleStatus(reportData)}
+                                title="Status: Pending. Klik untuk ubah menjadi Sudah Dibayarkan."
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700 hover:bg-amber-200 transition-colors cursor-pointer"
+                              >
+                                <Clock className="w-3.5 h-3.5" /> Pending
+                              </button>
+                            )
                           ) : (
                             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">
-                              Belum Dibuat
+                              <Clock className="w-3.5 h-3.5" /> Pending
                             </span>
                           )}
                         </td>
@@ -389,6 +459,43 @@ export default function AdminStaffPayrollPage() {
 
               <div className="overflow-y-auto custom-scrollbar flex-1 p-6">
                 <form onSubmit={handleGeneratePayroll} className="space-y-6">
+                  {/* Status Selection */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-700">Status Gaji</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className={`flex items-center justify-center gap-2 p-2.5 border rounded-xl cursor-pointer text-xs font-bold transition-all ${
+                        paymentStatus === "PAID"
+                          ? "bg-green-50 border-green-500 text-green-700 shadow-sm"
+                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                      }`}>
+                        <input
+                          type="radio"
+                          name="paymentStatus"
+                          value="PAID"
+                          checked={paymentStatus === "PAID"}
+                          onChange={() => setPaymentStatus("PAID")}
+                          className="sr-only"
+                        />
+                        <CheckCircle className="w-4 h-4" /> Sudah Dibayarkan
+                      </label>
+                      <label className={`flex items-center justify-center gap-2 p-2.5 border rounded-xl cursor-pointer text-xs font-bold transition-all ${
+                        paymentStatus === "PENDING"
+                          ? "bg-amber-50 border-amber-500 text-amber-700 shadow-sm"
+                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                      }`}>
+                        <input
+                          type="radio"
+                          name="paymentStatus"
+                          value="PENDING"
+                          checked={paymentStatus === "PENDING"}
+                          onChange={() => setPaymentStatus("PENDING")}
+                          className="sr-only"
+                        />
+                        <Clock className="w-4 h-4" /> Pending
+                      </label>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-gray-700">Kehadiran (Hari)</label>
@@ -489,7 +596,7 @@ export default function AdminStaffPayrollPage() {
                 </p>
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
                   <p className="text-xs text-amber-800 font-medium">
-                    ⚠️ Data slip gaji akan dihapus dan status akan kembali ke "Belum Dibuat". Anda bisa membuat ulang slip gaji setelahnya.
+                    ⚠️ Data slip gaji akan dihapus dan status akan kembali ke "Pending". Anda bisa membuat ulang slip gaji setelahnya.
                   </p>
                 </div>
                 <div className="flex gap-3 justify-end pt-2">
